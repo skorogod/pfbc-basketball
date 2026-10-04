@@ -1,0 +1,13 @@
+# Автоматический TLS (Let's Encrypt). Наружу открыты только webhook и health-check.
+{$DOMAIN} {
+	encode gzip
+
+	@allowed path /tg/webhook/* /healthz
+	handle @allowed {
+		reverse_proxy web:8080
+	}
+
+	handle {
+		respond 404
+	}
+}
