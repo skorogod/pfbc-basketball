@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -110,6 +110,35 @@ class TrainingsRepository:
             DutyAssignment.status == DutyStatus.ASSIGNED,
         )
         return (await self._session.scalars(stmt)).first()
+
+    async def complete_duties(self, now: datetime) -> int:
+        """Назначения на начавшиеся неотменённые тренировки: assigned → done."""
+        started = select(Training.id).where(
+            Training.starts_at <= now, Training.status.in_(ACTIVE_TRAINING_STATUSES)
+        )
+        stmt = (
+            update(DutyAssignment)
+            .where(
+                DutyAssignment.status == DutyStatus.ASSIGNED,
+                DutyAssignment.training_id.in_(started),
+            )
+            .values(status=DutyStatus.DONE)
+            .execution_options(synchronize_session=False)
+        )
+        result = await self._session.execute(stmt)
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def cancel_duties(self, training_id: int) -> None:
+        """Тренировку отменили: назначения не засчитываются (assigned → cancelled)."""
+        await self._session.execute(
+            update(DutyAssignment)
+            .where(
+                DutyAssignment.training_id == training_id,
+                DutyAssignment.status == DutyStatus.ASSIGNED,
+            )
+            .values(status=DutyStatus.CANCELLED)
+            .execution_options(synchronize_session=False)
+        )
 
     async def last_duty_at(self, squad_id: int, user_ids: list[int]) -> dict[int, datetime]:
         """Дата последнего фактического дежурства каждого пользователя в составе."""

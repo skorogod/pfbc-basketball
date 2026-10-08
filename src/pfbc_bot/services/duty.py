@@ -7,11 +7,14 @@
   нельзя, а назначение появилось после объявления (правка не присылает уведомлений), бот один
   раз упоминает его в топике ответом на объявление;
 - капитан (если его нет — тренер) управляет дежурствами в личке: замена следующим по очереди
-  или ручной выбор. Любое изменение — с подтверждением.
+  или ручной выбор. Любое изменение — с подтверждением;
+- после начала тренировки назначение становится «done». Если дежурного экстренно заменили,
+  а бот не знал, капитан, тренер или админ исправляет запись в течение FIX_HORIZON.
 """
 
 import html
 import random
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -21,6 +24,7 @@ from pfbc_bot.domain.dates import format_local, utcnow
 from pfbc_bot.domain.duty import DutyCandidate, select_duty
 from pfbc_bot.domain.enums import (
     ACTIVE_TRAINING_STATUSES,
+    COUNTED_DUTY_STATUSES,
     TRAINING_POLL_YES,
     DutyStatus,
     MembershipStatus,
@@ -50,6 +54,7 @@ TRAINING_REF = "training"
 DUTY_MANAGERS = (SquadRole.CAPTAIN, SquadRole.COACH)
 MAX_PICK_BUTTONS = 40
 MANAGE_HORIZON = timedelta(days=7)
+FIX_HORIZON = timedelta(days=7)  # сколько после тренировки можно исправить запись о дежурстве
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +131,16 @@ class DutyService:
             await self._send_staff_summary(uow, training)
         log.info("duty_assigned", training_id=training.id, users=chosen)
 
+    # --- тренировка состоялась ---
+    async def complete_due(self, *, now: datetime | None = None) -> int:
+        """Назначения на начавшиеся неотменённые тренировки засчитываются (assigned → done)."""
+        async with self._uow_factory() as uow:
+            completed = await uow.trainings.complete_duties(now or utcnow())
+            await uow.commit()
+        if completed:
+            log.info("duty_completed", count=completed)
+        return completed
+
     # --- отказ самого дежурного ---
     async def handle_decline(
         self, training_id: int, user_id: int, *, now: datetime | None = None
@@ -177,7 +192,8 @@ class DutyService:
     async def manager_prompts(
         self, actor: UserContext, squad_id: int, *, now: datetime | None = None
     ) -> list[Prompt]:
-        """Ближайшие тренировки с дежурными и кнопками управления (команда /duty)."""
+        """Команда /duty: ближайшие тренировки с дежурными и кнопками управления,
+        затем недавние прошедшие — с кнопками исправления записи."""
         self._require_manager(actor, squad_id)
         now = now or utcnow()
         async with self._uow_factory() as uow:
@@ -187,6 +203,11 @@ class DutyService:
             ):
                 if await uow.trainings.list_duties(training.id):
                     prompts.append(await self._staff_prompt(uow, training))
+            for training in await uow.trainings.list_between(
+                now - FIX_HORIZON, now, squad_id=squad_id
+            ):
+                if await self._counted(uow, training):
+                    prompts.append(await self._past_prompt(uow, training))
             if not prompts:
                 settings = await load_squad_settings(uow, squad_id)
                 hours = f"{settings.duty_lead_hours:g}"
@@ -281,6 +302,107 @@ class DutyService:
             await uow.commit()
             return ru.DUTY_PICKED.format(name=html.escape(to_dto(user).display_name))
 
+    # --- исправление прошедшего дежурства ---
+    async def fix_pick_list(
+        self, actor: UserContext, assignment_id: int, *, now: datetime | None = None
+    ) -> Prompt:
+        """Список участников: кто дежурил на самом деле вместо назначенного."""
+        async with self._uow_factory() as uow:
+            assignment, training = await self._fixable_assignment(
+                uow, actor, assignment_id, now or utcnow()
+            )
+            old_user = await uow.users.get(assignment.user_id)
+            counted = {a.user_id for a in await self._counted(uow, training)}
+            keyboard = await self._members_keyboard(
+                uow,
+                training,
+                counted,
+                lambda user: _button(
+                    to_dto(user).display_name, callbacks.DUTY_FIX_PICK, assignment_id, user.id
+                ),
+            )
+            return Prompt(
+                ru.DUTY_FIX_PICK_PROMPT.format(
+                    when=await self._when(uow, training),
+                    old=html.escape(to_dto(old_user).display_name) if old_user else "?",
+                ),
+                keyboard,
+            )
+
+    async def confirm_fix(
+        self, actor: UserContext, assignment_id: int, user_id: int, *, now: datetime | None = None
+    ) -> Prompt:
+        async with self._uow_factory() as uow:
+            assignment, training = await self._fixable_assignment(
+                uow, actor, assignment_id, now or utcnow()
+            )
+            new_user = await self._fix_candidate(uow, training, user_id)
+            old_user = await uow.users.get(assignment.user_id)
+            when = await self._when(uow, training)
+        return Prompt(
+            ru.DUTY_CONFIRM_FIX.format(
+                when=when,
+                new=html.escape(to_dto(new_user).display_name),
+                old=html.escape(to_dto(old_user).display_name) if old_user else "?",
+            ),
+            _confirm_keyboard(
+                ru.DUTY_BTN_CONFIRM_FIX, callbacks.DUTY_FIX_OK, assignment_id, user_id
+            ),
+        )
+
+    async def fix(
+        self, actor: UserContext, assignment_id: int, user_id: int, *, now: datetime | None = None
+    ) -> str:
+        """Дежурство засчитывается фактически дежурившему, назначенному — нет. Без уведомлений:
+        тренировка уже прошла, объявление в группе не трогаем."""
+        now = now or utcnow()
+        async with self._uow_factory() as uow:
+            assignment, training = await self._fixable_assignment(uow, actor, assignment_id, now)
+            new_user = await self._fix_candidate(uow, training, user_id)
+            old_user_id = assignment.user_id
+            assignment.status = DutyStatus.REPLACED
+            assignment.replaced_at = now
+            await uow.trainings.add_duty(
+                DutyAssignment(
+                    training_id=training.id,
+                    user_id=user_id,
+                    status=DutyStatus.DONE,
+                    assigned_by_user_id=actor.user.id,
+                )
+            )
+            await uow.system.audit(
+                actor_user_id=actor.user.id,
+                action="duty.fix",
+                entity="training",
+                entity_id=training.id,
+                payload={"from": old_user_id, "to": user_id},
+            )
+            await uow.commit()
+            log.info("duty_fixed", training_id=training.id, old=old_user_id, new=user_id)
+        return ru.DUTY_FIXED.format(name=html.escape(to_dto(new_user).display_name))
+
+    async def _fixable_assignment(
+        self, uow: UnitOfWork, actor: UserContext, assignment_id: int, now: datetime
+    ) -> tuple[DutyAssignment, Training]:
+        assignment = await uow.trainings.get_duty(assignment_id)
+        if assignment is None or assignment.status not in COUNTED_DUTY_STATUSES:
+            raise Conflict(ru.DUTY_ALREADY_CHANGED)
+        training = await uow.trainings.get(assignment.training_id)
+        if training is None:
+            raise Conflict(ru.DUTY_ALREADY_CHANGED)
+        self._require_manager(actor, training.squad_id)
+        if (
+            training.status not in ACTIVE_TRAINING_STATUSES
+            or not now - FIX_HORIZON <= training.starts_at <= now
+        ):
+            raise Conflict(ru.DUTY_FIX_UNAVAILABLE.format(days=FIX_HORIZON.days))
+        return assignment, training
+
+    async def _fix_candidate(self, uow: UnitOfWork, training: Training, user_id: int) -> User:
+        if user_id in {a.user_id for a in await self._counted(uow, training)}:
+            raise Conflict(ru.DUTY_ALREADY_ASSIGNED)
+        return await self._active_member(uow, training.squad_id, user_id)
+
     # --- проверки ---
     @staticmethod
     def _require_manager(actor: UserContext, squad_id: int) -> None:
@@ -325,7 +447,11 @@ class DutyService:
     async def _pickable_user(uow: UnitOfWork, training: Training, user_id: int) -> User:
         if await uow.trainings.active_duty_for_user(training.id, user_id):
             raise Conflict(ru.DUTY_ALREADY_ASSIGNED)
-        member = await uow.members.get(user_id, training.squad_id)
+        return await DutyService._active_member(uow, training.squad_id, user_id)
+
+    @staticmethod
+    async def _active_member(uow: UnitOfWork, squad_id: int, user_id: int) -> User:
+        member = await uow.members.get(user_id, squad_id)
         user = await uow.users.get(user_id)
         if member is None or user is None or member.status != MembershipStatus.ACTIVE:
             raise NotFound(ru.MEMBER_NOT_FOUND)
@@ -424,6 +550,15 @@ class DutyService:
             a
             for a in await uow.trainings.list_duties(training.id)
             if a.status == DutyStatus.ASSIGNED
+        ]
+
+    @staticmethod
+    async def _counted(uow: UnitOfWork, training: Training) -> list[DutyAssignment]:
+        """Засчитываемые назначения тренировки (assigned/done)."""
+        return [
+            a
+            for a in await uow.trainings.list_duties(training.id)
+            if a.status in COUNTED_DUTY_STATUSES
         ]
 
     async def _announcement_text(
@@ -537,6 +672,32 @@ class DutyService:
             keyboard,
         )
 
+    async def _past_prompt(self, uow: UnitOfWork, training: Training) -> Prompt:
+        counted = await self._counted(uow, training)
+        users = {u.id: u for u in await uow.users.list_by_ids([a.user_id for a in counted])}
+        squad = await uow.squads.get(training.squad_id)
+        names = "\n".join(
+            f"• {html.escape(to_dto(users[a.user_id]).display_name)}" for a in counted
+        )
+        keyboard = [
+            [
+                _button(
+                    ru.DUTY_BTN_FIX.format(name=to_dto(users[a.user_id]).display_name),
+                    callbacks.DUTY_FIX,
+                    a.id,
+                )
+            ]
+            for a in counted
+        ]
+        return Prompt(
+            ru.DUTY_PAST_DM.format(
+                when=await self._when(uow, training),
+                squad=html.escape(squad.name) if squad else "",
+                names=names,
+            ),
+            keyboard,
+        )
+
     async def _send_staff_summary(self, uow: UnitOfWork, training: Training) -> None:
         """Капитану (нет капитана — тренеру) в личку: кто дежурит и кнопки управления."""
         prompt = await self._staff_prompt(uow, training)
@@ -571,10 +732,27 @@ class DutyService:
 
     async def _pick_keyboard(self, uow: UnitOfWork, training: Training) -> Keyboard:
         assigned = {a.user_id for a in await self._active(uow, training)}
+        return await self._members_keyboard(
+            uow,
+            training,
+            assigned,
+            lambda user: _button(
+                to_dto(user).display_name, callbacks.DUTY_PICK, training.id, user.id
+            ),
+        )
+
+    @staticmethod
+    async def _members_keyboard(
+        uow: UnitOfWork,
+        training: Training,
+        exclude: Collection[int],
+        button: Callable[[User], InlineButton],
+    ) -> Keyboard:
+        """Активные участники состава кнопками по два в ряд (кроме exclude)."""
         buttons = [
-            _button(to_dto(user).display_name, callbacks.DUTY_PICK, training.id, user.id)
+            button(user)
             for _, user in await uow.members.list_active_for_squad(training.squad_id)
-            if user.id not in assigned
+            if user.id not in exclude
         ][:MAX_PICK_BUTTONS]
         return [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
 

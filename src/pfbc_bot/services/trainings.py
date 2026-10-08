@@ -221,6 +221,7 @@ class TrainingService:
 
     async def _cancel(self, uow: UnitOfWork, training: Training, *, announce: bool) -> None:
         training.status = TrainingStatus.CANCELLED
+        await uow.trainings.cancel_duties(training.id)
         poll = await uow.polls.get_for_ref(PollType.TRAINING, TRAINING_REF, training.id)
         if announce or poll is not None:  # если опрос уже был — команду нужно предупредить
             tz = squad_tz(await uow.squads.get(training.squad_id))

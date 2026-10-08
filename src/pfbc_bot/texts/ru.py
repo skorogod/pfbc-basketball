@@ -218,6 +218,18 @@ DUTY_ALREADY_CHANGED = "Это назначение уже изменено."
 DUTY_ALREADY_ASSIGNED = "Этот участник уже назначен дежурным."
 DUTY_TRAINING_PASSED = "Тренировка уже началась или отменена."
 DUTY_NOT_YOURS = "Это не ваше дежурство."
+DUTY_PAST_DM = (
+    "🧹 <b>Дежурили на тренировке {when}</b> ({squad}):\n{names}\n"
+    "Если дежурил(а) кто-то другой — исправьте запись."
+)
+DUTY_BTN_FIX = "✏️ Исправить: {name}"
+DUTY_FIX_PICK_PROMPT = "Кто дежурил на тренировке {when} вместо {old}?"
+DUTY_CONFIRM_FIX = "Записать дежурство на тренировке {when} на <b>{new}</b> вместо {old}?"
+DUTY_BTN_CONFIRM_FIX = "Да, записать"
+DUTY_FIXED = "✅ Дежурство записано на {name}."
+DUTY_FIX_UNAVAILABLE = (
+    "Исправить можно только дежурство на состоявшейся тренировке за последние {days} дн."
+)
 
 # --- дни рождения ---
 BIRTHDAY_DEFAULT_TEMPLATES: tuple[str, ...] = (

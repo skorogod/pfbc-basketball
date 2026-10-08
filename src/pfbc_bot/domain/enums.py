@@ -64,7 +64,8 @@ class PollType(StrEnum):
 class DutyStatus(StrEnum):
     ASSIGNED = "assigned"
     REPLACED = "replaced"
-    DONE = "done"
+    DONE = "done"  # тренировка состоялась (проставляет job после начала тренировки)
+    CANCELLED = "cancelled"  # тренировку отменили — дежурство не засчитывается
 
 
 COUNTED_DUTY_STATUSES: frozenset[DutyStatus] = frozenset({DutyStatus.ASSIGNED, DutyStatus.DONE})

@@ -1,4 +1,5 @@
-"""Дежурства в личке бота (ФТ-3): /duty, замена, ручной выбор, отказ — всё с подтверждением.
+"""Дежурства в личке бота (ФТ-3): /duty, замена, ручной выбор, отказ, исправление прошедшего
+дежурства — всё с подтверждением.
 
 Права проверяет сервис; здесь — только показ вопросов и результатов.
 """
@@ -56,11 +57,21 @@ async def on_duty_callback(callback: CallbackQuery, ctx: UserContext, services: 
     args = parsed.args
 
     # шаг 1: вопрос «точно?» — состояние не меняется
-    if parsed.action in {callbacks.DUTY_REPLACE, callbacks.DUTY_PICK, callbacks.DUTY_DECLINE}:
+    if parsed.action in {
+        callbacks.DUTY_REPLACE,
+        callbacks.DUTY_PICK,
+        callbacks.DUTY_DECLINE,
+        callbacks.DUTY_FIX,
+        callbacks.DUTY_FIX_PICK,
+    }:
         if parsed.action == callbacks.DUTY_REPLACE:
             prompt = await duty.confirm_replace(ctx, args[0])
         elif parsed.action == callbacks.DUTY_PICK:
             prompt = await duty.confirm_pick(ctx, args[0], args[1])
+        elif parsed.action == callbacks.DUTY_FIX:
+            prompt = await duty.fix_pick_list(ctx, args[0])
+        elif parsed.action == callbacks.DUTY_FIX_PICK:
+            prompt = await duty.confirm_fix(ctx, args[0], args[1])
         else:
             prompt = await duty.confirm_decline(ctx, args[0])
         await callback.answer()
@@ -80,6 +91,8 @@ async def on_duty_callback(callback: CallbackQuery, ctx: UserContext, services: 
         result = await duty.manual_pick(ctx, args[0], args[1])
     elif parsed.action == callbacks.DUTY_DECLINE_OK:
         result = await duty.decline(ctx, args[0])
+    elif parsed.action == callbacks.DUTY_FIX_OK:
+        result = await duty.fix(ctx, args[0], args[1])
     else:
         result = ru.CANCELLED
     await callback.answer()

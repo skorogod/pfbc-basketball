@@ -14,7 +14,7 @@ from pfbc_bot.services.container import Services
 from pfbc_bot.services.errors import Conflict, PermissionDenied
 from pfbc_bot.texts import ru
 
-from .conftest import FakeNotifier
+from .conftest import ADMIN_TG_ID, FakeNotifier
 from .helpers import CHAT_ID, TRAININGS_THREAD, ctx_of, join, setup_squad
 
 MSK = "Europe/Moscow"
@@ -255,12 +255,135 @@ async def test_manager_prompts_list_assigned_duties(
     services: Services, notifier: FakeNotifier, team: dict[str, int]
 ) -> None:
     captain = await ctx_of(services, CAPTAIN)
-    empty = await services.duty.manager_prompts(captain, team["squad_id"], now=at(9))
+    # прошедших тренировок с дежурными за 7 дней нет (в фикстуре — 7 и 30 дней назад)
+    empty = await services.duty.manager_prompts(captain, team["squad_id"], now=at(19, 1))
     assert len(empty) == 1 and "назначаются автоматически за 3 ч" in empty[0].text
     await services.polls.publish_training_polls(now=at(9))
     await services.polls.record_answer("poll-1", 1, [YES], now=at(10))
     await services.duty.assign_due(now=at(16))
+    # сначала ближайшая тренировка, затем прошедшая неделю назад — с кнопкой исправления
     prompts = await services.duty.manager_prompts(captain, team["squad_id"], now=at(16, 5))
-    assert len(prompts) == 1 and "user1" in prompts[0].text
+    assert len(prompts) == 2 and "user1" in prompts[0].text
+    assert ru.DUTY_BTN_MANUAL in {b.text for row in prompts[0].keyboard for b in row}
+    assert "Дежурили" in prompts[1].text
     with pytest.raises(PermissionDenied):
         await services.duty.manager_prompts(await ctx_of(services, 1), team["squad_id"])
+
+
+async def _statuses(uow_factory: UowFactory, training_id: int) -> dict[int, DutyStatus]:
+    async with uow_factory() as uow:
+        return {a.user_id: a.status for a in await uow.trainings.list_duties(training_id)}
+
+
+async def _last_duty(uow_factory: UowFactory, team: dict[str, int]) -> dict[int, datetime]:
+    async with uow_factory() as uow:
+        return await uow.trainings.last_duty_at(
+            team["squad_id"], [team[f"u{i}"] for i in (1, 2, 3, 4)]
+        )
+
+
+async def _assign_today(
+    services: Services, uow_factory: UowFactory, team: dict[str, int]
+) -> tuple[int, int]:
+    """Опрос, «Да» от 1–3, назначение дежурных (3 и 2). Возвращает тренировку и назначение 3."""
+    training_id = (await services.trainings.upcoming(team["squad_id"], now=at(9)))[0].id
+    await services.polls.publish_training_polls(now=at(9))
+    for tg_id in (1, 2, 3):
+        await services.polls.record_answer("poll-1", tg_id, [YES], now=at(10))
+    await services.duty.assign_due(now=at(16))
+    assert await _active_duty(uow_factory, training_id) == {team["u3"], team["u2"]}
+    return training_id, await _assignment_of(uow_factory, training_id, team["u3"])
+
+
+async def test_duty_done_after_training_starts(
+    services: Services, uow_factory: UowFactory, team: dict[str, int]
+) -> None:
+    assert await services.duty.complete_due(now=at(8)) == 2  # история из фикстуры
+    training_id, assignment_3 = await _assign_today(services, uow_factory, team)
+    await services.duty.decline(await ctx_of(services, 3), assignment_3, now=at(16, 10))
+
+    assert await services.duty.complete_due(now=at(18, 59)) == 0
+    assert await services.duty.complete_due(now=at(19)) == 2
+    assert await services.duty.complete_due(now=at(19, 5)) == 0
+    assert await _statuses(uow_factory, training_id) == {
+        team["u3"]: DutyStatus.REPLACED,
+        team["u2"]: DutyStatus.DONE,
+        team["u1"]: DutyStatus.DONE,
+    }
+
+
+async def test_cancelled_training_duty_not_counted(
+    services: Services, uow_factory: UowFactory, team: dict[str, int]
+) -> None:
+    training_id, assignment_3 = await _assign_today(services, uow_factory, team)
+    await services.trainings.cancel(await ctx_of(services, COACH), training_id)
+
+    assert set((await _statuses(uow_factory, training_id)).values()) == {DutyStatus.CANCELLED}
+    await services.duty.complete_due(now=at(19))
+    assert set((await _statuses(uow_factory, training_id)).values()) == {DutyStatus.CANCELLED}
+    last = await _last_duty(uow_factory, team)
+    assert team["u3"] not in last  # отменённая тренировка не сдвигает игрока в очереди
+    assert last[team["u2"]] == at(19) - timedelta(days=30)
+    with pytest.raises(Conflict):
+        await services.duty.fix_pick_list(await ctx_of(services, CAPTAIN), assignment_3, now=at(20))
+
+
+async def test_fix_past_duty(
+    services: Services, uow_factory: UowFactory, team: dict[str, int]
+) -> None:
+    training_id, assignment_3 = await _assign_today(services, uow_factory, team)
+    assignment_2 = await _assignment_of(uow_factory, training_id, team["u2"])
+    captain = await ctx_of(services, CAPTAIN)
+
+    # до начала тренировки исправлять нечего — для этого есть замена
+    with pytest.raises(Conflict):
+        await services.duty.fix_pick_list(captain, assignment_3, now=at(18))
+    await services.duty.complete_due(now=at(19))
+
+    # /duty после тренировки: блок прошедшей тренировки с кнопками «Исправить»
+    prompts = await services.duty.manager_prompts(captain, team["squad_id"], now=at(20))
+    fix_3 = callbacks.pack(callbacks.DUTY, callbacks.DUTY_FIX, assignment_3)
+    assert any(b.callback_data == fix_3 for p in prompts for row in p.keyboard for b in row)
+
+    # игрок исправлять не может
+    with pytest.raises(PermissionDenied):
+        await services.duty.fix(await ctx_of(services, 4), assignment_3, team["u4"], now=at(20))
+
+    # список — все активные, кроме уже засчитанных; засчитанного выбрать нельзя
+    pick_list = await services.duty.fix_pick_list(captain, assignment_3, now=at(20))
+    picks = {b.callback_data for row in pick_list.keyboard for b in row}
+    assert (
+        callbacks.pack(callbacks.DUTY, callbacks.DUTY_FIX_PICK, assignment_3, team["u4"]) in picks
+    )
+    assert (
+        callbacks.pack(callbacks.DUTY, callbacks.DUTY_FIX_PICK, assignment_3, team["u2"])
+        not in picks
+    )
+    with pytest.raises(Conflict):
+        await services.duty.confirm_fix(captain, assignment_3, team["u2"], now=at(20))
+
+    # вопрос-подтверждение ничего не меняет
+    prompt = await services.duty.confirm_fix(captain, assignment_3, team["u4"], now=at(20))
+    assert "user4" in prompt.text and "user3" in prompt.text
+    assert (await _statuses(uow_factory, training_id))[team["u3"]] == DutyStatus.DONE
+
+    # через 7 дней исправить уже нельзя
+    with pytest.raises(Conflict):
+        await services.duty.fix(captain, assignment_3, team["u4"], now=at(20) + timedelta(days=8))
+
+    assert "user4" in await services.duty.fix(captain, assignment_3, team["u4"], now=at(20))
+    assert await _statuses(uow_factory, training_id) == {
+        team["u3"]: DutyStatus.REPLACED,
+        team["u2"]: DutyStatus.DONE,
+        team["u4"]: DutyStatus.DONE,
+    }
+    last = await _last_duty(uow_factory, team)
+    assert last[team["u4"]] == at(19) and team["u3"] not in last
+    # повторное подтверждение — понятная ошибка, а не дубль
+    with pytest.raises(Conflict):
+        await services.duty.fix(captain, assignment_3, team["u4"], now=at(20))
+
+    # админ без роли в составе тоже может исправить
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    await services.duty.fix(admin, assignment_2, team["u1"], now=at(21))
+    assert (await _statuses(uow_factory, training_id))[team["u1"]] == DutyStatus.DONE

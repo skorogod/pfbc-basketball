@@ -15,6 +15,10 @@ DUTY_PICK = "pick"  # duty:pick:<training_id>:<user_id> — назначить �
 DUTY_PICK_OK = "pickok"  # duty:pickok:<training_id>:<user_id> — подтверждено
 DUTY_DECLINE = "decl"  # duty:decl:<assignment_id> — дежурный: не могу (спросить)
 DUTY_DECLINE_OK = "declok"  # duty:declok:<assignment_id> — подтверждено
+# Исправление прошедшего дежурства (экстренная замена, о которой бот не знал):
+DUTY_FIX = "fix"  # duty:fix:<assignment_id> — список: кто дежурил на самом деле
+DUTY_FIX_PICK = "fixp"  # duty:fixp:<assignment_id>:<user_id> — записать на выбранного (спросить)
+DUTY_FIX_OK = "fixok"  # duty:fixok:<assignment_id>:<user_id> — подтверждено
 DUTY_CANCEL = "no"  # duty:no — «Отмена» в вопросе подтверждения
 
 
