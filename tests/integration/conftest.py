@@ -54,6 +54,12 @@ class FakeNotifier:
     chat_members: dict[int, set[int]] = field(default_factory=dict)
     blocked_dm: set[int] = field(default_factory=set)
     edits: list[tuple[int, int, str]] = field(default_factory=list)
+    stopped_polls: list[tuple[int, int]] = field(default_factory=list)
+    # отправка с этим порядковым номером не доставлена (notifier вернул None)
+    fail_on: set[int] = field(default_factory=set)
+    # отправка с этим порядковым номером падает исключением (непредвиденный сбой посреди задачи)
+    crash_on: set[int] = field(default_factory=set)
+    _attempts: int = 0
     _poll_seq: int = 0
 
     async def send_message(
@@ -65,7 +71,10 @@ class FakeNotifier:
         keyboard: Keyboard | None = None,
         reply_to: int | None = None,
     ) -> int | None:
-        if chat_id in self.blocked_dm:
+        self._attempts += 1
+        if self._attempts in self.crash_on:
+            raise RuntimeError("simulated crash")
+        if chat_id in self.blocked_dm or self._attempts in self.fail_on:
             return None
         message_id = len(self.messages) + 1
         self.messages.append(SentMessage(chat_id, text, thread_id, keyboard, reply_to, message_id))
@@ -83,6 +92,10 @@ class FakeNotifier:
         self._poll_seq += 1
         self.polls.append((chat_id, question, thread_id))
         return SentPoll(poll_id=f"poll-{self._poll_seq}", message_id=1000 + self._poll_seq)
+
+    async def stop_poll(self, chat_id: int, message_id: int) -> bool:
+        self.stopped_polls.append((chat_id, message_id))
+        return True
 
     async def is_chat_member(self, chat_id: int, tg_user_id: int) -> bool | None:
         return tg_user_id in self.chat_members.get(chat_id, set())

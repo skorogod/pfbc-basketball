@@ -36,8 +36,18 @@ class TrainingsRepository:
         return list(await self._session.scalars(stmt))
 
     # --- тренировки ---
-    async def get(self, training_id: int) -> Training | None:
-        return await self._session.get(Training, training_id)
+    async def get(self, training_id: int, *, for_update: bool = False) -> Training | None:
+        """for_update — блокировка строки до конца транзакции: изменения дежурств и самой
+        тренировки (отказ, замена, перенос, отмена) выполняются строго по очереди."""
+        if not for_update:
+            return await self._session.get(Training, training_id)
+        stmt = (
+            select(Training)
+            .where(Training.id == training_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return (await self._session.scalars(stmt)).first()
 
     async def add(self, training: Training) -> Training:
         self._session.add(training)
@@ -87,8 +97,9 @@ class TrainingsRepository:
         return list(await self._session.scalars(stmt))
 
     # --- дежурства ---
-    async def get_duty(self, assignment_id: int) -> DutyAssignment | None:
-        return await self._session.get(DutyAssignment, assignment_id)
+    async def get_duty(self, assignment_id: int, *, refresh: bool = False) -> DutyAssignment | None:
+        """refresh — перечитать из БД (после блокировки тренировки), а не из кеша сессии."""
+        return await self._session.get(DutyAssignment, assignment_id, populate_existing=refresh)
 
     async def add_duty(self, assignment: DutyAssignment) -> DutyAssignment:
         self._session.add(assignment)
@@ -100,6 +111,23 @@ class TrainingsRepository:
             select(DutyAssignment)
             .where(DutyAssignment.training_id == training_id)
             .order_by(DutyAssignment.id)
+        )
+        return list(await self._session.scalars(stmt))
+
+    async def upcoming_duties_for_user(
+        self, user_id: int, squad_id: int, after: datetime
+    ) -> list[DutyAssignment]:
+        """Действующие назначения пользователя на ещё не начавшиеся тренировки состава."""
+        stmt = (
+            select(DutyAssignment)
+            .join(Training, Training.id == DutyAssignment.training_id)
+            .where(
+                DutyAssignment.user_id == user_id,
+                DutyAssignment.status == DutyStatus.ASSIGNED,
+                Training.squad_id == squad_id,
+                Training.starts_at > after,
+                Training.status.in_(ACTIVE_TRAINING_STATUSES),
+            )
         )
         return list(await self._session.scalars(stmt))
 
@@ -129,7 +157,7 @@ class TrainingsRepository:
         return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
     async def cancel_duties(self, training_id: int) -> None:
-        """Тренировку отменили: назначения не засчитываются (assigned → cancelled)."""
+        """Тренировку отменили или перенесли: назначения не засчитываются (assigned → cancelled)."""
         await self._session.execute(
             update(DutyAssignment)
             .where(

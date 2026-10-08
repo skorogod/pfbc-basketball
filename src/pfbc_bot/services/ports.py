@@ -58,6 +58,10 @@ class Notifier(Protocol):
         """Неанонимный опрос с одним вариантом ответа."""
         ...
 
+    async def stop_poll(self, chat_id: int, message_id: int) -> bool:
+        """Закрывает опрос бота: голосовать в нём больше нельзя."""
+        ...
+
     async def is_chat_member(self, chat_id: int, tg_user_id: int) -> bool | None:
         """True/False — состоит ли пользователь в чате; None — проверить не удалось."""
         ...

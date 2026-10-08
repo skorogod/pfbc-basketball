@@ -23,8 +23,12 @@ class PollsRepository:
         ).first()
 
     async def get_for_ref(self, poll_type: PollType, ref_type: str, ref_id: int) -> Poll | None:
+        """Действующий опрос объекта (устаревшие после переноса не учитываются)."""
         stmt = select(Poll).where(
-            Poll.type == poll_type, Poll.ref_type == ref_type, Poll.ref_id == ref_id
+            Poll.type == poll_type,
+            Poll.ref_type == ref_type,
+            Poll.ref_id == ref_id,
+            Poll.superseded_at.is_(None),
         )
         return (await self._session.scalars(stmt)).first()
 

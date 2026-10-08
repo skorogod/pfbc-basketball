@@ -159,6 +159,13 @@ TRAINING_ADDED = "✅ Тренировка добавлена: {when}, {venue}"
 TRAINING_CANCELLED_GROUP = "❌ Тренировка {when} ({venue}) <b>отменена</b>."
 TRAINING_MOVED_GROUP = "🔁 Тренировка перенесена: {old} → <b>{new}</b> ({venue})."
 TRAINING_DONE = "Готово ✅"
+TRAINING_ALREADY_STARTED = "Тренировка уже началась — отменить или перенести её нельзя."
+TRAINING_CONFIRM_CANCEL = "Отменить тренировку {when}? Команда получит сообщение в группе."
+TRAINING_BTN_CONFIRM_CANCEL = "Да, отменить"
+SCHEDULE_CONFIRM_REMOVE = (
+    "Удалить из расписания «{label}»? Будущие тренировки по нему будут отменены."
+)
+SCHEDULE_BTN_CONFIRM_REMOVE = "Да, удалить"
 TRAINING_POLL_QUESTION = "🏀 Тренировка {when}, {venue}. Придёшь?"
 ATTENDANCE = "<b>Тренировка {when}</b>\n{lines}\nНе ответили: {missing}"
 ATTENDANCE_NO_POLL = "Опрос на эту тренировку ещё не публиковался."
@@ -175,9 +182,22 @@ DUTY_ASSIGNED_DM = (
     "Если не можете — нажмите кнопку ниже, бот назначит следующего по очереди."
 )
 DUTY_INSTEAD = " вместо {name}"
-DUTY_ASSIGNED_FALLBACK = (
-    "🧹 {mention}, вы назначены дежурным на тренировку {when}{instead}. "
-    "Приходите за {minutes} минут до начала."
+DUTY_REPLACED_GROUP = (
+    "🔁 Замена дежурного на тренировку {when}: {old} → {new}.\n"
+    "Пожалуйста, приходите за {minutes} минут до начала."
+)
+DUTY_REMOVED_GROUP = "🔁 {old} не дежурит на тренировке {when}. Замену назначит капитан."
+DUTY_PICKED_GROUP = (
+    "🧹 Дежурный на тренировку {when}: {new}.\nПожалуйста, приходите за {minutes} минут до начала."
+)
+DUTY_NOT_NOTIFIED_MARK = " ⚠️ не получил(а) уведомление"
+DUTY_NOT_NOTIFIED_CAPTAIN = (
+    "\n⚠️ {name} не получил(а) уведомление (личка закрыта, в группу отправить не удалось) — "
+    "предупредите лично."
+)
+DUTY_MOVED_DM = (
+    "ℹ️ Тренировка {old} перенесена на <b>{new}</b> — ваше дежурство снято. "
+    "Дежурных назначат заново по опросу на новое время."
 )
 DUTY_UNASSIGNED_DM = "ℹ️ Вы больше не дежурный на тренировку {when}: вас заменил(а) {name}."
 DUTY_STAFF_DM = "🧹 <b>Дежурные на тренировку {when}</b> ({squad}):\n{names}"
@@ -193,6 +213,7 @@ DUTY_NO_REPLACEMENT = "Свободных по очереди нет — выб�
 DUTY_AUTO_REPLACED_CAPTAIN = (
     "ℹ️ {old} ответил(а) «не приду» на тренировку {when} — дежурный заменён на {new}."
 )
+DUTY_LEFT_CAPTAIN = "ℹ️ {old} вышел(а) из группы — дежурный на тренировку {when} заменён на {new}."
 DUTY_SELF_DECLINED_CAPTAIN = (
     "ℹ️ {old} не может дежурить на тренировке {when} — дежурный заменён на {new}."
 )
@@ -271,6 +292,7 @@ EVENTS_HEADER = "<b>Ближайшие события</b>"
 EVENTS_EMPTY = "Ближайших событий нет."
 EVENT_LINE = "• {when} — <b>{title}</b> ({type}, {squad}){place}"
 EVENT_ANNOUNCE = "📅 <b>{type}: {title}</b>\n🕒 {when}{place}{description}"
+EVENT_CANCELLED = "❌ <b>Отменено — {type}: {title}</b>\n🕒 {when}"
 EVENT_REMINDER = "⏰ Напоминание{when_left}: <b>{title}</b>\n{when}{place}{description}"
 EVENT_IN_DAYS = {0: " — сегодня", 1: " — завтра"}
 EVENT_IN_N_DAYS = " — через {days} дн."

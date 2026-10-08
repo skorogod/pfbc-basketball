@@ -220,12 +220,15 @@ class EventService:
     async def delete(
         self, actor: UserContext, event_id: int, *, now: datetime | None = None
     ) -> None:
+        """Удаляет событие. Если оно ещё не прошло — команда получает новое сообщение об отмене:
+        в группу (если событие публиковалось) и тренерам/капитанам в личку."""
+        now = now or utcnow()
         async with self._uow_factory() as uow:
             event = await uow.events.get(event_id)
             if event is None:
                 raise NotFound("Событие не найдено")
             self._require_manager(actor, event.squad_id)
-            event.deleted_at = now or utcnow()
+            event.deleted_at = now
             await uow.system.audit(
                 actor_user_id=actor.user.id,
                 action="event.delete",
@@ -233,6 +236,20 @@ class EventService:
                 entity_id=event_id,
             )
             await uow.commit()
+            if event.starts_at <= now:
+                return
+            dto = EventDTO.model_validate(event)
+            text = ru.EVENT_CANCELLED.format(
+                type=EVENT_TYPE_TITLES[dto.type],
+                title=html.escape(dto.title),
+                when=format_interval(
+                    dto.starts_at, dto.ends_at, squad_tz(await uow.squads.get(dto.squad_id))
+                ),
+            )
+            if event.notify_group:
+                await send_to_squad(uow, self._notifier, dto.squad_id, event_topic(dto.type), text)
+            await notify_staff(uow, self._notifier, dto.squad_id, text, roles=EVENT_MANAGERS)
+            await uow.commit()  # dm_available
 
     async def upcoming(
         self, squad_ids: list[int], *, now: datetime | None = None, days: int = 60
@@ -276,6 +293,7 @@ class EventService:
                 ):
                     if not await uow.system.claim_reminder(f"event:{event.id}:{offset}", "event"):
                         continue
+                    await uow.commit()  # отметка — до рассылки: сбой не приведёт к повтору
                     text = format_reminder(dto, offset, squad.timezone)
                     await notify_staff(
                         uow, self._notifier, event.squad_id, text, roles=EVENT_MANAGERS

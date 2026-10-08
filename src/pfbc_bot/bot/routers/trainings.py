@@ -6,7 +6,7 @@ from aiogram import F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from pfbc_bot.bot.helpers import ask_squad, callback_message
@@ -118,9 +118,39 @@ async def on_schedule_action(
         await state.set_state(ScheduleEdit.line)
         await state.update_data(squad_id=callback_data.item_id)
         await message.answer(ru.SCHEDULE_ADD_PROMPT)
-    elif callback_data.action == "del":
+    elif callback_data.action == "del":  # шаг 1: вопрос — ничего не меняет
+        schedule = await services.trainings.get_schedule(callback_data.item_id)
+        label = f"{WEEKDAY_SHORT[schedule.weekday]} {schedule.start_time:%H:%M} · {schedule.venue}"
+        await message.answer(
+            ru.SCHEDULE_CONFIRM_REMOVE.format(label=html.escape(label)),
+            reply_markup=_confirm_markup(
+                "sch", "del_ok", callback_data.item_id, ru.SCHEDULE_BTN_CONFIRM_REMOVE
+            ),
+        )
+    elif callback_data.action == "del_ok":  # шаг 2: подтверждено — вопрос заменяется результатом
         await services.trainings.remove_schedule(ctx, callback_data.item_id)
-        await message.answer(ru.SCHEDULE_REMOVED)
+        await message.edit_text(ru.SCHEDULE_REMOVED, reply_markup=None)
+
+
+def _confirm_markup(
+    kind: str, action: str, item_id: int, confirm_text: str
+) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=confirm_text, callback_data=ItemAction(kind=kind, action=action, item_id=item_id)
+    )
+    builder.button(
+        text=ru.BTN_CANCEL, callback_data=ItemAction(kind="confirm", action="no", item_id=0)
+    )
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+@router.callback_query(ItemAction.filter(F.kind == "confirm"))
+async def on_confirm_cancelled(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if message := callback_message(callback):
+        await message.edit_text(ru.CANCELLED, reply_markup=None)
 
 
 @router.message(ScheduleEdit.line, F.text)
@@ -169,7 +199,9 @@ async def show_trainings(message: Message, squad: SquadDTO, services: Services) 
     await message.answer("\n".join(lines), reply_markup=builder.as_markup())
 
 
-@router.callback_query(ItemAction.filter((F.kind == "tr") & F.action.in_({"cancel", "move"})))
+@router.callback_query(
+    ItemAction.filter((F.kind == "tr") & F.action.in_({"cancel", "cancel_ok", "move"}))
+)
 async def on_training_action(
     callback: CallbackQuery,
     callback_data: ItemAction,
@@ -181,9 +213,20 @@ async def on_training_action(
     message = callback_message(callback)
     if message is None:
         return
-    if callback_data.action == "cancel":
+    if callback_data.action == "cancel":  # шаг 1: вопрос — ничего не меняет
+        training = await services.trainings.get(callback_data.item_id)
+        squad = await services.squads.get(training.squad_id)
+        await message.answer(
+            ru.TRAINING_CONFIRM_CANCEL.format(
+                when=format_local(training.starts_at, squad.timezone)
+            ),
+            reply_markup=_confirm_markup(
+                "tr", "cancel_ok", callback_data.item_id, ru.TRAINING_BTN_CONFIRM_CANCEL
+            ),
+        )
+    elif callback_data.action == "cancel_ok":  # шаг 2: подтверждено
         await services.trainings.cancel(ctx, callback_data.item_id)
-        await message.answer(ru.TRAINING_DONE)
+        await message.edit_text(ru.TRAINING_DONE, reply_markup=None)
     else:
         await state.set_state(TrainingEdit.move)
         await state.update_data(training_id=callback_data.item_id)

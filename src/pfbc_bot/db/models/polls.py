@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, ForeignKey, String, UniqueConstraint
+from sqlalchemy import BigInteger, ForeignKey, Index, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pfbc_bot.db.base import Base, CreatedAtMixin, IdMixin, str_enum
@@ -12,7 +12,17 @@ class Poll(IdMixin, CreatedAtMixin, Base):
     """Опрос, опубликованный ботом (неанонимный — чтобы получать poll_answer)."""
 
     __tablename__ = "polls"
-    __table_args__ = (UniqueConstraint("type", "ref_type", "ref_id"),)
+    __table_args__ = (
+        # один действующий опрос на объект; устаревшие (после переноса тренировки) — в истории
+        Index(
+            "uq_polls_active_ref",
+            "type",
+            "ref_type",
+            "ref_id",
+            unique=True,
+            postgresql_where=text("superseded_at IS NULL"),
+        ),
+    )
 
     type: Mapped[PollType] = mapped_column(str_enum(PollType))
     squad_id: Mapped[int] = mapped_column(ForeignKey("squads.id", ondelete="CASCADE"), index=True)
@@ -24,6 +34,8 @@ class Poll(IdMixin, CreatedAtMixin, Base):
     question: Mapped[str] = mapped_column(String(300))
     options: Mapped[list[Any]]
     closes_at: Mapped[datetime | None]
+    # тренировку перенесли — опрос закрыт, ответы в нём больше ни на что не влияют
+    superseded_at: Mapped[datetime | None]
 
 
 class PollAnswer(IdMixin, Base):

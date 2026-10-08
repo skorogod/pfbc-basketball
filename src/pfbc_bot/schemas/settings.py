@@ -21,6 +21,11 @@ class SquadSettings(BaseModel):
     model_config = ConfigDict(extra="ignore")  # устаревшие ключи в БД не ломают загрузку
 
     training_poll_time: time = time(9, 0)
+    # «ранняя» тренировка — начинается не позже early_training_until (включительно): опрос
+    # накануне в training_poll_eve_time, дежурные и сообщения о них — утром в duty_morning_time
+    early_training_until: time = time(14, 0)
+    training_poll_eve_time: time = time(21, 0)
+    duty_morning_time: time = time(8, 0)
     duty_lead_hours: float = Field(default=3.0, gt=0, le=24)
     duty_count: int = Field(default=2, ge=1, le=5)
     duty_newcomer_grace_days: int = Field(default=14, ge=0, le=365)

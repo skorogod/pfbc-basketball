@@ -3,6 +3,7 @@
 HTTP к Telegram подменён записывающей сессией: ответы бота проверяются по исходящим запросам.
 """
 
+import asyncio
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
@@ -24,10 +25,11 @@ from aiogram.types import (
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from pfbc_bot.bot.factory import create_dispatcher
-from pfbc_bot.bot.keyboards.common import Choice
+from pfbc_bot.bot.keyboards.common import Choice, ItemAction
+from pfbc_bot.bot.middlewares.access import to_telegram_user
 from pfbc_bot.bot.routers.admin import AdminAction, RoleAction
 from pfbc_bot.domain.dates import local_to_utc
-from pfbc_bot.domain.enums import SquadRole
+from pfbc_bot.domain.enums import SquadRole, TrainingStatus
 from pfbc_bot.repositories.uow import UowFactory
 from pfbc_bot.schemas.trainings import TrainingCreate
 from pfbc_bot.services.container import Services
@@ -55,6 +57,7 @@ class RecordingSession(BaseSession):
         timeout: int | None = None,  # noqa: ASYNC109
     ) -> Any:
         self.requests.append(method)
+        await asyncio.sleep(0.005)  # как у настоящей сети: параллельные апдейты перемешиваются
         if isinstance(method, SendMessage):
             return Message(
                 message_id=len(self.requests),
@@ -300,7 +303,8 @@ async def test_accidental_duty_button_press_changes_nothing(
     assert await services.polls.publish_training_polls(now=starts - timedelta(minutes=1)) == 1
     for tg_id in (PLAYER, 3):
         await services.polls.record_answer("poll-1", tg_id, [0])
-    await services.duty.assign_due()
+    # за минуту до начала дежурные назначены при любом правиле (ранняя тренировка или нет)
+    await services.duty.assign_due(now=starts - timedelta(minutes=1))
     async with uow_factory() as uow:
         duties = {a.id: a.status for a in await uow.trainings.list_duties(training.id)}
     assert len(duties) == 2
@@ -328,3 +332,88 @@ async def test_accidental_duty_button_press_changes_nothing(
 
 async def bind(harness: Harness) -> None:
     await harness.group(ADMIN_TG_ID, "/bind Взрослые")
+
+
+async def test_double_press_publishes_event_once(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    await bind(harness)
+    await harness.member(COACH, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach_id = (await ctx_of(services, COACH)).user.id
+    await services.squads.set_role(admin, squad.id, coach_id, SquadRole.COACH, grant=True)
+
+    day = (datetime.now(UTC) + timedelta(days=30)).date()
+    await harness.private(COACH, "/event_add")
+    await harness.press(COACH, Choice(flow="ev_type", value="meeting").pack())
+    await harness.private(COACH, "Собрание команды")
+    await harness.private(COACH, f"{day:%d.%m.%Y} 20:00")
+    await harness.press(COACH, Choice(flow="ev_dur", value="60").pack())
+    await harness.press(COACH, Choice(flow="ev_place", value="skip").pack())
+    await harness.press(COACH, Choice(flow="ev_descr", value="skip").pack())
+    publish = Choice(flow="ev_pub", value="yes").pack()
+    await asyncio.gather(harness.press(COACH, publish), harness.press(COACH, publish))
+
+    assert len(await services.events.upcoming([squad.id])) == 1
+    assert len([m for m in notifier.to(GROUP_ID) if "Собрание команды" in m.text]) == 1
+    # второе нажатие не доходит до создания: нет и ложного «пересекается с самим собой»
+    assert not any(ru.EVENT_CONFLICT_HEADER in t for t in harness.session.texts_to(COACH))
+
+
+async def test_training_cancel_needs_confirmation(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    await bind(harness)
+    await harness.member(COACH, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach = await ctx_of(services, COACH)
+    await services.squads.set_role(admin, squad.id, coach.user.id, SquadRole.COACH, grant=True)
+    training = await services.trainings.add_one_off(
+        await ctx_of(services, COACH),
+        TrainingCreate(
+            squad_id=squad.id,
+            starts_at=datetime.now(UTC) + timedelta(days=3),
+            venue="Зал №5",
+        ),
+    )
+
+    await harness.press(COACH, ItemAction(kind="tr", action="cancel", item_id=training.id).pack())
+    assert "Отменить тренировку" in harness.session.texts_to(COACH)[-1]
+    assert (await services.trainings.get(training.id)).status == TrainingStatus.PLANNED
+
+    await harness.press(COACH, ItemAction(kind="confirm", action="no", item_id=0).pack())
+    assert (await services.trainings.get(training.id)).status == TrainingStatus.PLANNED
+
+    await harness.press(
+        COACH, ItemAction(kind="tr", action="cancel_ok", item_id=training.id).pack()
+    )
+    assert (await services.trainings.get(training.id)).status == TrainingStatus.CANCELLED
+    assert any("отменена" in m.text for m in notifier.to(GROUP_ID))
+
+
+async def test_group_message_discovers_member_who_joined_before_bot(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    await bind(harness)
+    # бот о пользователе 5 не знал: вступил до подключения бота. Написал в группе — участник
+    await harness.group(5, "Всем привет!")
+    ctx = await ctx_of(services, 5)
+    assert ctx.is_member
+    # в группу бот при этом ничего не пишет
+    assert notifier.to(GROUP_ID) == [] and harness.session.texts_to(GROUP_ID) == []
+
+    # служебное «вышел из группы» не заводит членство
+    await harness.feed(
+        message=Message(
+            message_id=2,
+            date=NOW,
+            chat=Chat(id=GROUP_ID, type="supergroup", title="PFBC"),
+            from_user=_user(6),
+            left_chat_member=_user(6),
+        )
+    )
+    assert await services.access.load_context(to_telegram_user(_user(6))) is None

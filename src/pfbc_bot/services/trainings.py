@@ -1,12 +1,18 @@
-"""Расписание тренировок, разовые тренировки, отмены и переносы (ФТ-2)."""
+"""Расписание тренировок, разовые тренировки, отмены и переносы (ФТ-2).
+
+Отмена и перенос возможны только до начала тренировки. При переносе команда получает новые
+сообщения: о переносе — в группу, новый опрос — на новое время (старый закрывается), снятым
+дежурным — в личку; дежурные назначаются заново по ответам на новый опрос.
+"""
 
 import html
 from datetime import datetime, timedelta
 
-from pfbc_bot.db.models import Training, TrainingSchedule
+from pfbc_bot.db.models import Training, TrainingSchedule, User
 from pfbc_bot.domain.dates import dates_for_weekday, format_local, local_to_utc, to_local, utcnow
 from pfbc_bot.domain.enums import (
     ACTIVE_TRAINING_STATUSES,
+    DutyStatus,
     PollType,
     SquadRole,
     TopicPurpose,
@@ -16,8 +22,10 @@ from pfbc_bot.domain.enums import (
 from pfbc_bot.repositories.uow import UnitOfWork, UowFactory
 from pfbc_bot.schemas.squads import UserContext
 from pfbc_bot.schemas.trainings import ScheduleCreate, ScheduleDTO, TrainingCreate, TrainingDTO
-from pfbc_bot.services.common import send_to_squad, squad_tz
+from pfbc_bot.services.common import send_direct, send_to_squad, squad_tz
+from pfbc_bot.services.duty import duty_key
 from pfbc_bot.services.errors import Conflict, NotFound, PermissionDenied
+from pfbc_bot.services.polls import poll_key
 from pfbc_bot.services.ports import Notifier
 from pfbc_bot.texts import ru
 
@@ -50,6 +58,13 @@ class TrainingService:
             )
             await self._materialize_schedule(uow, schedule, now or utcnow())
             await uow.commit()
+            return ScheduleDTO.model_validate(schedule)
+
+    async def get_schedule(self, schedule_id: int) -> ScheduleDTO:
+        async with self._uow_factory() as uow:
+            schedule = await uow.trainings.get_schedule(schedule_id)
+            if schedule is None or not schedule.is_active:
+                raise NotFound("Запись расписания не найдена")
             return ScheduleDTO.model_validate(schedule)
 
     async def list_schedules(self, squad_id: int) -> list[ScheduleDTO]:
@@ -160,9 +175,11 @@ class TrainingService:
             await uow.commit()
             return TrainingDTO.model_validate(training)
 
-    async def cancel(self, actor: UserContext, training_id: int) -> TrainingDTO:
+    async def cancel(
+        self, actor: UserContext, training_id: int, *, now: datetime | None = None
+    ) -> TrainingDTO:
         async with self._uow_factory() as uow:
-            training = await self._get_active(uow, training_id)
+            training = await self._get_upcoming(uow, training_id, now or utcnow())
             require_coach(actor, training.squad_id)
             await self._cancel(uow, training, announce=True)
             await uow.system.audit(
@@ -182,15 +199,18 @@ class TrainingService:
         *,
         now: datetime | None = None,
     ) -> TrainingDTO:
-        if new_starts_at <= (now or utcnow()):
+        now = now or utcnow()
+        if new_starts_at <= now:
             raise Conflict(ru.PAST_DATE)
         async with self._uow_factory() as uow:
-            training = await self._get_active(uow, training_id)
+            training = await self._get_upcoming(uow, training_id, now)
             require_coach(actor, training.squad_id)
             tz = squad_tz(await uow.squads.get(training.squad_id))
             old = training.starts_at
             training.starts_at = new_starts_at
             training.status = TrainingStatus.MOVED
+            await self._reset_poll(uow, training, now)
+            removed = await self._reset_duties(uow, training)
             await send_to_squad(
                 uow,
                 self._notifier,
@@ -210,14 +230,45 @@ class TrainingService:
                 payload={"from": old.isoformat(), "to": new_starts_at.isoformat()},
             )
             await uow.commit()
+            text = ru.DUTY_MOVED_DM.format(
+                old=format_local(old, tz), new=format_local(new_starts_at, tz)
+            )
+            for user in removed:
+                await send_direct(self._notifier, user, text)
+            await uow.commit()  # dm_available
             return TrainingDTO.model_validate(training)
 
     @staticmethod
-    async def _get_active(uow: UnitOfWork, training_id: int) -> Training:
-        training = await uow.trainings.get(training_id)
+    async def _get_upcoming(uow: UnitOfWork, training_id: int, now: datetime) -> Training:
+        """Тренировка под блокировкой (параллельно с заменой дежурных); только до начала."""
+        training = await uow.trainings.get(training_id, for_update=True)
         if training is None or training.status not in ACTIVE_TRAINING_STATUSES:
             raise NotFound("Тренировка не найдена или уже отменена")
+        if training.starts_at <= now:
+            raise Conflict(ru.TRAINING_ALREADY_STARTED)
         return training
+
+    async def _reset_poll(self, uow: UnitOfWork, training: Training, now: datetime) -> None:
+        """Опрос на старое время закрывается; новый опубликует планировщик по новому времени."""
+        poll = await uow.polls.get_for_ref(PollType.TRAINING, TRAINING_REF, training.id)
+        if poll is not None:
+            poll.superseded_at = now
+            await self._notifier.stop_poll(poll.chat_id, poll.message_id)
+        await uow.system.release_reminder(poll_key(training.id))
+
+    @staticmethod
+    async def _reset_duties(uow: UnitOfWork, training: Training) -> list[User]:
+        """Дежурные на старое время снимаются; назначение повторится по новому опросу.
+        Возвращает снятых — им отправляется личное сообщение."""
+        assigned = [
+            a.user_id
+            for a in await uow.trainings.list_duties(training.id)
+            if a.status == DutyStatus.ASSIGNED
+        ]
+        await uow.trainings.cancel_duties(training.id)
+        await uow.system.release_reminder(duty_key(training.id))
+        training.duty_chat_id = training.duty_message_id = None  # объявление будет новым
+        return await uow.users.list_by_ids(assigned)
 
     async def _cancel(self, uow: UnitOfWork, training: Training, *, announce: bool) -> None:
         training.status = TrainingStatus.CANCELLED

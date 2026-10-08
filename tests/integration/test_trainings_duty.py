@@ -1,5 +1,6 @@
 """ФТ-2 и ФТ-3: расписание → утренний опрос → дежурные → замены."""
 
+import asyncio
 from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
@@ -9,7 +10,7 @@ from pfbc_bot.db.models import DutyAssignment, Training
 from pfbc_bot.domain.dates import local_to_utc
 from pfbc_bot.domain.enums import DutyStatus, SquadRole, TrainingSource
 from pfbc_bot.repositories.uow import UowFactory
-from pfbc_bot.schemas.trainings import ScheduleCreate
+from pfbc_bot.schemas.trainings import ScheduleCreate, TrainingCreate
 from pfbc_bot.services.container import Services
 from pfbc_bot.services.errors import Conflict, PermissionDenied
 from pfbc_bot.texts import ru
@@ -108,11 +109,14 @@ async def test_full_training_day(
     assert notifier.to(COACH) == []  # при наличии капитана тренеру сводка не нужна
 
     # дежурный ответил «Нет» в опросе — автозамена следующим (1): объявление отредактировано,
-    # новому — в личку, капитану — уведомление, новых сообщений в группе нет
+    # в группе — одно новое сообщение о замене (ответом на объявление, с упоминанием нового),
+    # новому — в личку, капитану — уведомление
     group_before = len(notifier.to(CHAT_ID))
     await services.polls.record_answer("poll-1", 3, [NO], now=at(16, 30))
     assert await _active_duty(uow_factory, training_id) == {team["u2"], team["u1"]}
-    assert len(notifier.to(CHAT_ID)) == group_before
+    change = notifier.to(CHAT_ID)[group_before:]
+    assert len(change) == 1 and "Замена дежурного" in change[0].text
+    assert change[0].reply_to == announce[0].message_id and "tg://user?id=1" in change[0].text
     assert notifier.edits[-1][1] == announce[0].message_id
     assert (
         "tg://user?id=1" in notifier.edits[-1][2] and "tg://user?id=3" not in notifier.edits[-1][2]
@@ -179,8 +183,8 @@ async def test_cancel_after_poll_announces_to_group(
     await services.polls.publish_training_polls(now=at(9))
     training = (await services.trainings.upcoming(team["squad_id"], now=at(9)))[0]
     with pytest.raises(PermissionDenied):
-        await services.trainings.cancel(await ctx_of(services, CAPTAIN), training.id)
-    await services.trainings.cancel(await ctx_of(services, COACH), training.id)
+        await services.trainings.cancel(await ctx_of(services, CAPTAIN), training.id, now=at(9))
+    await services.trainings.cancel(await ctx_of(services, COACH), training.id, now=at(9))
     assert any("отменена" in m.text for m in notifier.to(CHAT_ID))
     assert await services.duty.assign_due(now=at(16)) == 0
 
@@ -231,24 +235,24 @@ async def test_duty_declines_himself_with_confirmation(
         await services.duty.decline(me, assignment_3, now=at(16, 12))
 
 
-async def test_closed_dm_falls_back_to_one_group_mention(
+async def test_not_notified_duty_marked_for_captain(
     services: Services, notifier: FakeNotifier, uow_factory: UowFactory, team: dict[str, int]
 ) -> None:
+    """Личка закрыта и группа недоступна — капитан видит «не получил уведомление»."""
     await services.polls.publish_training_polls(now=at(9))
     for tg_id in (1, 2, 3):
         await services.polls.record_answer("poll-1", tg_id, [YES], now=at(10))
-    notifier.blocked_dm.update({1, 3})  # личка закрыта у 1 и 3
+    notifier.blocked_dm.update({3, CHAT_ID})  # у 3 закрыта личка, в группу отправить нельзя
     await services.duty.assign_due(now=at(16))
-    group = notifier.to(CHAT_ID)
-    announce = next(m for m in group if "Дежурные" in m.text)
-    # 3 упомянут в объявлении — отдельного сообщения нет
-    assert [m for m in group if "вы назначены" in m.text] == []
+    summary = notifier.to(CAPTAIN)[-1].text
+    lines = {line for line in summary.splitlines() if line.startswith("•")}
+    assert f"• user3{ru.DUTY_NOT_NOTIFIED_MARK}" in lines
+    assert "• user2" in lines  # личное сообщение дошло — пометки нет
 
-    await services.polls.record_answer("poll-1", 3, [NO], now=at(16, 30))
-    # 1 назначен заменой после объявления, личка закрыта — одно упоминание ответом на объявление
-    fallback = [m for m in notifier.to(CHAT_ID) if "вы назначены" in m.text]
-    assert len(fallback) == 1
-    assert fallback[0].reply_to == announce.message_id and "tg://user?id=1" in fallback[0].text
+    # замена тоже не дошла до нового дежурного — капитан предупреждён
+    notifier.blocked_dm.add(1)
+    await services.polls.record_answer("poll-1", 2, [NO], now=at(16, 30))
+    assert "user1 не получил(а) уведомление" in notifier.to(CAPTAIN)[-1].text
 
 
 async def test_manager_prompts_list_assigned_duties(
@@ -316,7 +320,7 @@ async def test_cancelled_training_duty_not_counted(
     services: Services, uow_factory: UowFactory, team: dict[str, int]
 ) -> None:
     training_id, assignment_3 = await _assign_today(services, uow_factory, team)
-    await services.trainings.cancel(await ctx_of(services, COACH), training_id)
+    await services.trainings.cancel(await ctx_of(services, COACH), training_id, now=at(17))
 
     assert set((await _statuses(uow_factory, training_id)).values()) == {DutyStatus.CANCELLED}
     await services.duty.complete_due(now=at(19))
@@ -387,3 +391,121 @@ async def test_fix_past_duty(
     admin = await ctx_of(services, ADMIN_TG_ID)
     await services.duty.fix(admin, assignment_2, team["u1"], now=at(21))
     assert (await _statuses(uow_factory, training_id))[team["u1"]] == DutyStatus.DONE
+
+
+TUE = DAY + timedelta(days=1)
+
+
+async def test_early_training_poll_eve_before_and_duty_in_morning(
+    services: Services, notifier: FakeNotifier, uow_factory: UowFactory, team: dict[str, int]
+) -> None:
+    """Тренировка до 14:00 включительно: опрос накануне в 21:00, дежурные — утром в 08:00."""
+    coach = await ctx_of(services, COACH)
+    early = await services.trainings.add_one_off(
+        coach,
+        TrainingCreate(squad_id=team["squad_id"], starts_at=at(14, day=TUE), venue="Зал №5"),
+        now=at(8),
+    )
+    assert await services.polls.publish_training_polls(now=at(20, 59)) == 0
+    assert await services.polls.publish_training_polls(now=at(21)) == 1
+    assert "06.10.2026 14:00" in notifier.polls[-1][1]
+    for tg_id in (1, 2, 3):
+        await services.polls.record_answer("poll-1", tg_id, [YES], now=at(21, 30))
+
+    assert await services.duty.assign_due(now=at(7, 59, day=TUE)) == 0
+    assert await services.duty.assign_due(now=at(8, day=TUE)) == 1
+    assert await _active_duty(uow_factory, early.id) == {team["u3"], team["u2"]}
+
+
+async def test_duty_waits_for_poll(
+    services: Services, uow_factory: UowFactory, team: dict[str, int]
+) -> None:
+    """Опроса ещё нет — дежурные не назначаются «никем», а ждут его."""
+    assert await services.duty.assign_due(now=at(16)) == 0
+    await services.polls.publish_training_polls(now=at(16, 1))
+    await services.polls.record_answer("poll-1", 1, [YES], now=at(16, 2))
+    assert await services.duty.assign_due(now=at(16, 3)) == 1
+    training_id = (await services.trainings.upcoming(team["squad_id"], now=at(9)))[0].id
+    assert await _active_duty(uow_factory, training_id) == {team["u1"]}
+
+
+async def test_crash_during_duty_messages_does_not_repeat_announcement(
+    services: Services, notifier: FakeNotifier, uow_factory: UowFactory, team: dict[str, int]
+) -> None:
+    await services.polls.publish_training_polls(now=at(9))
+    for tg_id in (1, 2, 3):
+        await services.polls.record_answer("poll-1", tg_id, [YES], now=at(10))
+    notifier.crash_on = {2}  # объявление ушло, личное сообщение дежурному «упало»
+    with pytest.raises(RuntimeError):
+        await services.duty.assign_due(now=at(16))
+    assert await services.duty.assign_due(now=at(16, 1)) == 0
+    announcements = [m for m in notifier.to(CHAT_ID) if "Дежурные по залу" in m.text]
+    assert len(announcements) == 1
+    training_id = (await services.trainings.upcoming(team["squad_id"], now=at(9)))[0].id
+    assert await _active_duty(uow_factory, training_id) == {team["u3"], team["u2"]}
+
+
+async def test_concurrent_decline_and_replace_make_one_replacement(
+    services: Services, notifier: FakeNotifier, uow_factory: UowFactory, team: dict[str, int]
+) -> None:
+    training_id, assignment_3 = await _assign_today(services, uow_factory, team)
+    captain = await ctx_of(services, CAPTAIN)
+    results = await asyncio.gather(
+        services.polls.record_answer("poll-1", 3, [NO], now=at(16, 30)),
+        services.duty.replace(captain, assignment_3, now=at(16, 30)),
+        return_exceptions=True,
+    )
+    assert all(r is None or isinstance(r, str | Conflict) for r in results), results
+    assert await _active_duty(uow_factory, training_id) == {team["u2"], team["u1"]}
+    statuses = [s for s in (await _statuses(uow_factory, training_id)).values()]
+    assert statuses.count(DutyStatus.REPLACED) == 1
+    assert len([m for m in notifier.to(CHAT_ID) if "Замена дежурного" in m.text]) == 1
+
+
+async def test_move_reopens_poll_and_reassigns_duty(
+    services: Services, notifier: FakeNotifier, uow_factory: UowFactory, team: dict[str, int]
+) -> None:
+    training_id, _ = await _assign_today(services, uow_factory, team)
+    coach = await ctx_of(services, COACH)
+    await services.trainings.move(coach, training_id, at(19, day=TUE), now=at(17))
+
+    # в группу — новое сообщение о переносе; старый опрос закрыт; снятым дежурным — в личку
+    assert any("перенесена" in m.text for m in notifier.to(CHAT_ID))
+    assert notifier.stopped_polls == [(CHAT_ID, 1001)]
+    for tg_id in (3, 2):
+        assert "дежурство снято" in notifier.to(tg_id)[-1].text
+    assert set((await _statuses(uow_factory, training_id)).values()) == {DutyStatus.CANCELLED}
+
+    # ответ в старом опросе ни на что не влияет
+    await services.polls.record_answer("poll-1", 1, [NO], now=at(17, 5))
+
+    # новый опрос — по новому времени, дежурные — заново, с новым объявлением
+    assert await services.polls.publish_training_polls(now=at(8, 59, day=TUE)) == 0
+    assert await services.polls.publish_training_polls(now=at(9, day=TUE)) == 1
+    for tg_id in (1, 2, 3):
+        await services.polls.record_answer("poll-2", tg_id, [YES], now=at(10, day=TUE))
+    assert await services.duty.assign_due(now=at(16, day=TUE)) == 1
+    assert await _active_duty(uow_factory, training_id) == {team["u3"], team["u2"]}
+    assert len([m for m in notifier.to(CHAT_ID) if "Дежурные по залу" in m.text]) == 2
+
+
+async def test_cancel_or_move_after_start_is_refused(
+    services: Services, notifier: FakeNotifier, team: dict[str, int]
+) -> None:
+    training_id = (await services.trainings.upcoming(team["squad_id"], now=at(9)))[0].id
+    coach = await ctx_of(services, COACH)
+    with pytest.raises(Conflict):
+        await services.trainings.cancel(coach, training_id, now=at(19, 1))
+    with pytest.raises(Conflict):
+        await services.trainings.move(coach, training_id, at(19, day=TUE), now=at(19, 1))
+    assert notifier.to(CHAT_ID) == []
+
+
+async def test_member_who_left_is_replaced_on_duty(
+    services: Services, notifier: FakeNotifier, uow_factory: UowFactory, team: dict[str, int]
+) -> None:
+    training_id, _ = await _assign_today(services, uow_factory, team)
+    await services.membership.on_leave(CHAT_ID, 3, removed=False, now=at(16, 30))
+    assert await _active_duty(uow_factory, training_id) == {team["u2"], team["u1"]}
+    assert any("вышел(а) из группы" in m.text for m in notifier.to(CAPTAIN))
+    assert any("Замена дежурного" in m.text for m in notifier.to(CHAT_ID))

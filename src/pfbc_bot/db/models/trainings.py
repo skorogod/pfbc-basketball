@@ -1,6 +1,6 @@
 from datetime import date, datetime, time
 
-from sqlalchemy import BigInteger, ForeignKey, Index, SmallInteger, String, UniqueConstraint
+from sqlalchemy import BigInteger, ForeignKey, Index, SmallInteger, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pfbc_bot.db.base import Base, CreatedAtMixin, IdMixin, str_enum
@@ -53,7 +53,17 @@ class DutyAssignment(IdMixin, CreatedAtMixin, Base):
     """Назначение дежурного по залу на тренировку."""
 
     __tablename__ = "duty_assignments"
-    __table_args__ = (Index("ix_duty_assignments_user_status", "user_id", "status"),)
+    __table_args__ = (
+        Index("ix_duty_assignments_user_status", "user_id", "status"),
+        # защита от гонок: один и тот же игрок не может быть засчитан дважды на тренировку
+        Index(
+            "uq_duty_assignments_counted_user",
+            "training_id",
+            "user_id",
+            unique=True,
+            postgresql_where=text("status IN ('assigned', 'done')"),
+        ),
+    )
 
     training_id: Mapped[int] = mapped_column(
         ForeignKey("trainings.id", ondelete="CASCADE"), index=True

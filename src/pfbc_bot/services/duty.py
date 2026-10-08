@@ -1,15 +1,19 @@
 """Назначение дежурных по залу (ФТ-3).
 
 Как это выглядит для людей:
-- в топике «Тренировки» — одно объявление о дежурных без кнопок; при заменах бот его
-  редактирует, а не пишет новые сообщения (группа не засоряется, случайно нажать нечего);
-- дежурный получает назначение в личку с кнопкой «Не могу дежурить». Если в личку написать
-  нельзя, а назначение появилось после объявления (правка не присылает уведомлений), бот один
-  раз упоминает его в топике ответом на объявление;
+- в топике «Тренировки» — объявление о дежурных без кнопок. При любой замене бот пишет новое
+  сообщение с упоминанием нового дежурного (ответом на объявление), чтобы его точно увидели, а
+  само объявление правит — оно всегда актуально;
+- дежурный получает назначение в личку с кнопкой «Не могу дежурить»;
 - капитан (если его нет — тренер) управляет дежурствами в личке: замена следующим по очереди
-  или ручной выбор. Любое изменение — с подтверждением;
+  или ручной выбор. Любое изменение — с подтверждением. Если назначенный не получил ни личного
+  сообщения, ни упоминания в группе, капитан видит пометку «не получил уведомление»;
+- на раннюю тренировку (опрос накануне вечером) дежурные назначаются утром в duty_morning_time;
 - после начала тренировки назначение становится «done». Если дежурного экстренно заменили,
   а бот не знал, капитан, тренер или админ исправляет запись в течение FIX_HORIZON.
+
+Все изменения дежурств тренировки выполняются под блокировкой её строки: одновременные отказ
+в опросе, кнопка дежурного и кнопка капитана не приводят к двойной замене.
 """
 
 import html
@@ -20,7 +24,7 @@ from datetime import datetime, timedelta
 
 from pfbc_bot import callbacks
 from pfbc_bot.db.models import DutyAssignment, Training, User
-from pfbc_bot.domain.dates import format_local, utcnow
+from pfbc_bot.domain.dates import duty_assign_at, format_local, utcnow
 from pfbc_bot.domain.duty import DutyCandidate, select_duty
 from pfbc_bot.domain.enums import (
     ACTIVE_TRAINING_STATUSES,
@@ -65,8 +69,20 @@ class Prompt:
     keyboard: Keyboard = field(default_factory=list)
 
 
+def duty_key(training_id: int) -> str:
+    """Ключ reminder_log назначения дежурных (снимается при переносе — назначат заново)."""
+    return f"duty:{training_id}"
+
+
 def _button(text: str, action: str, *args: int) -> InlineButton:
     return InlineButton(text, callback_data=callbacks.pack(callbacks.DUTY, action, *args))
+
+
+def _picked(user: User, notified: bool) -> str:
+    """Ответ капитану после назначения; предупреждение, если дежурный ничего не получил."""
+    name = html.escape(to_dto(user).display_name)
+    text = ru.DUTY_PICKED.format(name=name)
+    return text if notified else text + ru.DUTY_NOT_NOTIFIED_CAPTAIN.format(name=name)
 
 
 def _confirm_keyboard(confirm_text: str, action: str, *args: int) -> Keyboard:
@@ -83,7 +99,11 @@ class DutyService:
 
     # --- плановое назначение ---
     async def assign_due(self, *, now: datetime | None = None) -> int:
-        """Назначает дежурных на тренировки, до начала которых осталось ≤ duty_lead_hours."""
+        """Назначает дежурных, когда подошло время (duty_assign_at): за duty_lead_hours до начала,
+        на раннюю тренировку — утром. Ждёт, пока опубликован опрос: кандидаты — ответившие «Да».
+
+        Две фазы: сначала отметка и назначения фиксируются в БД, затем рассылка. Сбой рассылки
+        не приводит к повторному объявлению на следующем тике."""
         now = now or utcnow()
         async with self._uow_factory() as uow:
             training_ids = [
@@ -92,44 +112,68 @@ class DutyService:
         assigned = 0
         for training_id in training_ids:
             async with self._uow_factory() as uow:
-                training = await uow.trainings.get(training_id)
+                training = await uow.trainings.get(training_id, for_update=True)
                 if training is None or training.status not in ACTIVE_TRAINING_STATUSES:
                     continue
                 settings = await load_squad_settings(uow, training.squad_id)
                 if not settings.features.duty:
                     continue
-                if training.starts_at - timedelta(hours=settings.duty_lead_hours) > now:
+                tz = squad_tz(await uow.squads.get(training.squad_id))
+                assign_at = duty_assign_at(
+                    starts_at=training.starts_at,
+                    tz=tz,
+                    poll_time=settings.training_poll_time,
+                    duty_lead=timedelta(hours=settings.duty_lead_hours),
+                    early_until=settings.early_training_until,
+                    morning_time=settings.duty_morning_time,
+                    arrive_before=timedelta(minutes=settings.duty_arrive_minutes),
+                )
+                if assign_at > now:
                     continue
-                if not await uow.system.claim_reminder(f"duty:{training.id}", "duty"):
+                if settings.features.training_polls and not await uow.polls.get_for_ref(
+                    PollType.TRAINING, TRAINING_REF, training.id
+                ):
+                    continue  # опроса ещё нет — некого выбирать; ждём следующего тика
+                if not await uow.system.claim_reminder(duty_key(training.id), "duty"):
                     continue
-                await self._assign_initial(uow, training, settings, now)
+                chosen = select_duty(
+                    await self._candidates(uow, training),
+                    count=settings.duty_count,
+                    now=now,
+                    grace_days=settings.duty_newcomer_grace_days,
+                    rng=self._rng,
+                )
+                assignments = [
+                    await uow.trainings.add_duty(
+                        DutyAssignment(training_id=training.id, user_id=user_id)
+                    )
+                    for user_id in chosen
+                ]
                 await uow.commit()
+                await self._announce_initial(uow, training, settings, assignments)
+                await uow.commit()
+                log.info("duty_assigned", training_id=training.id, users=chosen)
                 assigned += 1
         return assigned
 
-    async def _assign_initial(
-        self, uow: UnitOfWork, training: Training, settings: SquadSettings, now: datetime
+    async def _announce_initial(
+        self,
+        uow: UnitOfWork,
+        training: Training,
+        settings: SquadSettings,
+        assignments: list[DutyAssignment],
     ) -> None:
-        chosen = select_duty(
-            await self._candidates(uow, training),
-            count=settings.duty_count,
-            now=now,
-            grace_days=settings.duty_newcomer_grace_days,
-            rng=self._rng,
-        )
-        assignments = [
-            await uow.trainings.add_duty(DutyAssignment(training_id=training.id, user_id=user_id))
-            for user_id in chosen
-        ]
-        await self._publish_announcement(uow, training, settings)
+        """Объявление в группе, личные сообщения дежурным, сводка капитану."""
+        announced = await self._publish_announcement(uow, training, settings)
+        not_notified: set[int] = set()
         for assignment in assignments:
-            # объявление в группе уже упомянуло дежурного — запасное сообщение не нужно
-            await self._notify_assigned(uow, training, assignment, settings, announced=True)
-        if len(chosen) < settings.duty_count:
-            await self._notify_shortage(uow, training, len(chosen), settings.duty_count)
+            delivered = await self._notify_assigned(uow, training, assignment, settings)
+            if not delivered and not announced:
+                not_notified.add(assignment.user_id)
+        if len(assignments) < settings.duty_count:
+            await self._notify_shortage(uow, training, len(assignments), settings.duty_count)
         else:
-            await self._send_staff_summary(uow, training)
-        log.info("duty_assigned", training_id=training.id, users=chosen)
+            await self._send_staff_summary(uow, training, not_notified)
 
     # --- тренировка состоялась ---
     async def complete_due(self, *, now: datetime | None = None) -> int:
@@ -148,14 +192,15 @@ class DutyService:
         """Дежурный ответил «не приду» в опросе — автоматическая замена, капитану уведомление."""
         now = now or utcnow()
         async with self._uow_factory() as uow:
-            assignment = await uow.trainings.active_duty_for_user(training_id, user_id)
-            training = await uow.trainings.get(training_id)
+            training = await uow.trainings.get(training_id, for_update=True)
             if (
-                assignment is None
-                or training is None
+                training is None
                 or training.status not in ACTIVE_TRAINING_STATUSES
                 or training.starts_at <= now
             ):
+                return
+            assignment = await uow.trainings.active_duty_for_user(training_id, user_id)
+            if assignment is None:
                 return
             await self._replace_and_report(
                 uow, training, assignment, now, ru.DUTY_AUTO_REPLACED_CAPTAIN
@@ -181,7 +226,9 @@ class DutyService:
         """Дежурный сам отказался (кнопка «Не могу дежурить»); ответ в опросе остаётся «Да»."""
         now = now or utcnow()
         async with self._uow_factory() as uow:
-            assignment, training = await self._own_assignment(uow, actor, assignment_id, now)
+            assignment, training = await self._own_assignment(
+                uow, actor, assignment_id, now, lock=True
+            )
             await self._replace_and_report(
                 uow, training, assignment, now, ru.DUTY_SELF_DECLINED_CAPTAIN
             )
@@ -245,14 +292,18 @@ class DutyService:
         """Замена следующим по очереди. Если заменить некем — капитану список для выбора."""
         now = now or utcnow()
         async with self._uow_factory() as uow:
-            assignment, training = await self._managed_assignment(uow, actor, assignment_id, now)
-            new_user = await self._replace(uow, training, assignment, now, by_user_id=actor.user.id)
+            assignment, training = await self._managed_assignment(
+                uow, actor, assignment_id, now, lock=True
+            )
+            new_user, notified = await self._replace(
+                uow, training, assignment, now, by_user_id=actor.user.id
+            )
             if new_user is None:
                 await self._send_pick_list(uow, actor.user.id, training, ru.DUTY_NO_REPLACEMENT)
                 await uow.commit()
                 return ru.DUTY_MANUAL_SENT
             await uow.commit()
-            return ru.DUTY_PICKED.format(name=html.escape(to_dto(new_user).display_name))
+            return _picked(new_user, notified)
 
     async def send_pick_list(
         self, actor: UserContext, training_id: int, *, now: datetime | None = None
@@ -288,7 +339,7 @@ class DutyService:
     ) -> str:
         now = now or utcnow()
         async with self._uow_factory() as uow:
-            training = await self._get_upcoming(uow, training_id, now)
+            training = await self._get_upcoming(uow, training_id, now, lock=True)
             self._require_manager(actor, training.squad_id)
             user = await self._pickable_user(uow, training, user_id)
             assignment = await uow.trainings.add_duty(
@@ -298,9 +349,18 @@ class DutyService:
             )
             settings = await load_squad_settings(uow, training.squad_id)
             await self._refresh_announcement(uow, training, settings)
-            await self._notify_assigned(uow, training, assignment, settings, announced=False)
+            posted = await self._post_to_group(
+                uow,
+                training,
+                ru.DUTY_PICKED_GROUP.format(
+                    when=await self._when(uow, training),
+                    new=to_dto(user).mention_html,
+                    minutes=settings.duty_arrive_minutes,
+                ),
+            )
+            delivered = await self._notify_assigned(uow, training, assignment, settings)
             await uow.commit()
-            return ru.DUTY_PICKED.format(name=html.escape(to_dto(user).display_name))
+            return _picked(user, posted or delivered)
 
     # --- исправление прошедшего дежурства ---
     async def fix_pick_list(
@@ -357,7 +417,9 @@ class DutyService:
         тренировка уже прошла, объявление в группе не трогаем."""
         now = now or utcnow()
         async with self._uow_factory() as uow:
-            assignment, training = await self._fixable_assignment(uow, actor, assignment_id, now)
+            assignment, training = await self._fixable_assignment(
+                uow, actor, assignment_id, now, lock=True
+            )
             new_user = await self._fix_candidate(uow, training, user_id)
             old_user_id = assignment.user_id
             assignment.status = DutyStatus.REPLACED
@@ -382,13 +444,16 @@ class DutyService:
         return ru.DUTY_FIXED.format(name=html.escape(to_dto(new_user).display_name))
 
     async def _fixable_assignment(
-        self, uow: UnitOfWork, actor: UserContext, assignment_id: int, now: datetime
+        self,
+        uow: UnitOfWork,
+        actor: UserContext,
+        assignment_id: int,
+        now: datetime,
+        *,
+        lock: bool = False,
     ) -> tuple[DutyAssignment, Training]:
-        assignment = await uow.trainings.get_duty(assignment_id)
-        if assignment is None or assignment.status not in COUNTED_DUTY_STATUSES:
-            raise Conflict(ru.DUTY_ALREADY_CHANGED)
-        training = await uow.trainings.get(assignment.training_id)
-        if training is None:
+        assignment, training = await self._load_assignment(uow, assignment_id, lock=lock)
+        if assignment.status not in COUNTED_DUTY_STATUSES:
             raise Conflict(ru.DUTY_ALREADY_CHANGED)
         self._require_manager(actor, training.squad_id)
         if (
@@ -410,8 +475,10 @@ class DutyService:
             raise PermissionDenied(ru.NO_PERMISSION)
 
     @staticmethod
-    async def _get_upcoming(uow: UnitOfWork, training_id: int, now: datetime) -> Training:
-        training = await uow.trainings.get(training_id)
+    async def _get_upcoming(
+        uow: UnitOfWork, training_id: int, now: datetime, *, lock: bool = False
+    ) -> Training:
+        training = await uow.trainings.get(training_id, for_update=lock)
         if (
             training is None
             or training.status not in ACTIVE_TRAINING_STATUSES
@@ -420,25 +487,55 @@ class DutyService:
             raise Conflict(ru.DUTY_TRAINING_PASSED)
         return training
 
-    async def _active_assignment(
-        self, uow: UnitOfWork, assignment_id: int, now: datetime
+    @staticmethod
+    async def _load_assignment(
+        uow: UnitOfWork, assignment_id: int, *, lock: bool
     ) -> tuple[DutyAssignment, Training]:
+        """Назначение и его тренировка. lock — тренировка блокируется, а назначение после этого
+        перечитывается: параллельная операция могла уже изменить его статус."""
         assignment = await uow.trainings.get_duty(assignment_id)
-        if assignment is None or assignment.status != DutyStatus.ASSIGNED:
+        if assignment is None:
             raise Conflict(ru.DUTY_ALREADY_CHANGED)
-        return assignment, await self._get_upcoming(uow, assignment.training_id, now)
+        training = await uow.trainings.get(assignment.training_id, for_update=lock)
+        if lock:
+            assignment = await uow.trainings.get_duty(assignment_id, refresh=True)
+        if assignment is None or training is None:
+            raise Conflict(ru.DUTY_ALREADY_CHANGED)
+        return assignment, training
+
+    async def _active_assignment(
+        self, uow: UnitOfWork, assignment_id: int, now: datetime, *, lock: bool
+    ) -> tuple[DutyAssignment, Training]:
+        assignment, training = await self._load_assignment(uow, assignment_id, lock=lock)
+        if assignment.status != DutyStatus.ASSIGNED:
+            raise Conflict(ru.DUTY_ALREADY_CHANGED)
+        if training.status not in ACTIVE_TRAINING_STATUSES or training.starts_at <= now:
+            raise Conflict(ru.DUTY_TRAINING_PASSED)
+        return assignment, training
 
     async def _managed_assignment(
-        self, uow: UnitOfWork, actor: UserContext, assignment_id: int, now: datetime
+        self,
+        uow: UnitOfWork,
+        actor: UserContext,
+        assignment_id: int,
+        now: datetime,
+        *,
+        lock: bool = False,
     ) -> tuple[DutyAssignment, Training]:
-        assignment, training = await self._active_assignment(uow, assignment_id, now)
+        assignment, training = await self._active_assignment(uow, assignment_id, now, lock=lock)
         self._require_manager(actor, training.squad_id)
         return assignment, training
 
     async def _own_assignment(
-        self, uow: UnitOfWork, actor: UserContext, assignment_id: int, now: datetime
+        self,
+        uow: UnitOfWork,
+        actor: UserContext,
+        assignment_id: int,
+        now: datetime,
+        *,
+        lock: bool = False,
     ) -> tuple[DutyAssignment, Training]:
-        assignment, training = await self._active_assignment(uow, assignment_id, now)
+        assignment, training = await self._active_assignment(uow, assignment_id, now, lock=lock)
         if assignment.user_id != actor.user.id:
             raise PermissionDenied(ru.DUTY_NOT_YOURS)
         return assignment, training
@@ -483,13 +580,18 @@ class DutyService:
         now: datetime,
         *,
         by_user_id: int | None,
-    ) -> User | None:
-        """Снимает дежурного (назначение не засчитывается) и назначает следующего по очереди."""
+    ) -> tuple[User | None, bool]:
+        """Снимает дежурного (назначение не засчитывается) и назначает следующего по очереди.
+
+        В группу — новое сообщение о замене (правка объявления уведомлений не присылает).
+        Возвращает нового дежурного и получил ли он уведомление (в личку или упоминанием)."""
         new_user = await self._next_in_queue(uow, training, assignment, now)
         assignment.status = DutyStatus.REPLACED
         assignment.replaced_at = now
         settings = await load_squad_settings(uow, training.squad_id)
         old_user = await uow.users.get(assignment.user_id)
+        old_name = html.escape(to_dto(old_user).display_name) if old_user else "?"
+        when = await self._when(uow, training)
         new_assignment = None
         if new_user is not None:
             new_assignment = await uow.trainings.add_duty(
@@ -498,9 +600,25 @@ class DutyService:
                 )
             )
         await self._refresh_announcement(uow, training, settings)
-        if new_assignment is not None:
-            await self._notify_assigned(
-                uow, training, new_assignment, settings, announced=False, instead=old_user
+        notified = False
+        if new_user is not None and new_assignment is not None:
+            posted = await self._post_to_group(
+                uow,
+                training,
+                ru.DUTY_REPLACED_GROUP.format(
+                    when=when,
+                    old=old_name,
+                    new=to_dto(new_user).mention_html,
+                    minutes=settings.duty_arrive_minutes,
+                ),
+            )
+            delivered = await self._notify_assigned(
+                uow, training, new_assignment, settings, instead=old_user
+            )
+            notified = posted or delivered
+        else:
+            await self._post_to_group(
+                uow, training, ru.DUTY_REMOVED_GROUP.format(when=when, old=old_name)
             )
         # снятого капитаном/тренером предупреждаем; кто отказался сам — и так знает
         if by_user_id is not None and old_user is not None and by_user_id != old_user.id:
@@ -512,7 +630,7 @@ class DutyService:
                     when=await self._when(uow, training), name=html.escape(replacement)
                 ),
             )
-        return new_user
+        return new_user, notified
 
     async def _replace_and_report(
         self,
@@ -524,13 +642,16 @@ class DutyService:
     ) -> None:
         """Замена после отказа дежурного: капитану — кто кого заменил или список для выбора."""
         old_user = await uow.users.get(assignment.user_id)
-        new_user = await self._replace(uow, training, assignment, now, by_user_id=None)
+        new_user, notified = await self._replace(uow, training, assignment, now, by_user_id=None)
         if new_user is not None:
+            new_name = html.escape(to_dto(new_user).display_name)
             text = template.format(
                 old=html.escape(to_dto(old_user).display_name) if old_user else "?",
                 when=await self._when(uow, training),
-                new=html.escape(to_dto(new_user).display_name),
+                new=new_name,
             )
+            if not notified:
+                text += ru.DUTY_NOT_NOTIFIED_CAPTAIN.format(name=new_name)
             await notify_staff(
                 uow, self._notifier, training.squad_id, text, roles=[SquadRole.CAPTAIN]
             )
@@ -539,6 +660,36 @@ class DutyService:
         await self._notify_shortage(
             uow, training, len(await self._active(uow, training)), settings.duty_count
         )
+
+    # --- игрок вышел из группы ---
+    async def handle_member_left(
+        self, user_id: int, squad_id: int, *, now: datetime | None = None
+    ) -> int:
+        """Вышедший из группы снимается с будущих дежурств состава: автозамена, капитану —
+        уведомление (если заменить некем — список для выбора). Возвращает число замен."""
+        now = now or utcnow()
+        async with self._uow_factory() as uow:
+            pending = [
+                (a.id, a.training_id)
+                for a in await uow.trainings.upcoming_duties_for_user(user_id, squad_id, now)
+            ]
+        replaced = 0
+        for assignment_id, training_id in pending:
+            async with self._uow_factory() as uow:
+                training = await uow.trainings.get(training_id, for_update=True)
+                assignment = await uow.trainings.get_duty(assignment_id, refresh=True)
+                if (
+                    training is None
+                    or assignment is None
+                    or assignment.status != DutyStatus.ASSIGNED
+                    or training.status not in ACTIVE_TRAINING_STATUSES
+                    or training.starts_at <= now
+                ):
+                    continue
+                await self._replace_and_report(uow, training, assignment, now, ru.DUTY_LEFT_CAPTAIN)
+                await uow.commit()
+                replaced += 1
+        return replaced
 
     # --- сообщения ---
     async def _when(self, uow: UnitOfWork, training: Training) -> str:
@@ -575,17 +726,34 @@ class DutyService:
 
     async def _publish_announcement(
         self, uow: UnitOfWork, training: Training, settings: SquadSettings
-    ) -> None:
+    ) -> bool:
+        """Объявление о дежурных в топике «Тренировки». True — опубликовано."""
         destination = await resolve_destination(uow, training.squad_id, TopicPurpose.TRAININGS)
         if destination is None:
-            return
+            return False
         message_id = await self._notifier.send_message(
             destination.chat_id,
             await self._announcement_text(uow, training, settings),
             thread_id=destination.thread_id,
         )
-        if message_id is not None:
-            training.duty_chat_id, training.duty_message_id = destination.chat_id, message_id
+        if message_id is None:
+            return False
+        training.duty_chat_id, training.duty_message_id = destination.chat_id, message_id
+        return True
+
+    async def _post_to_group(self, uow: UnitOfWork, training: Training, text: str) -> bool:
+        """Новое сообщение об изменении дежурных — ответом на объявление, чтобы было видно, к
+        чему оно относится. True — доставлено."""
+        destination = await resolve_destination(uow, training.squad_id, TopicPurpose.TRAININGS)
+        if destination is None:
+            return False
+        message_id = await self._notifier.send_message(
+            destination.chat_id,
+            text,
+            thread_id=destination.thread_id,
+            reply_to=training.duty_message_id,
+        )
+        return message_id is not None
 
     async def _refresh_announcement(
         self, uow: UnitOfWork, training: Training, settings: SquadSettings
@@ -605,21 +773,19 @@ class DutyService:
         assignment: DutyAssignment,
         settings: SquadSettings,
         *,
-        announced: bool,
         instead: User | None = None,
-    ) -> None:
-        """Личное сообщение дежурному. Если личка закрыта, а в группе он ещё не упомянут
-        (назначение после объявления), — короткое упоминание в топике ответом на объявление."""
+    ) -> bool:
+        """Личное сообщение дежурному с кнопкой «Не могу дежурить». True — доставлено."""
         user = await uow.users.get(assignment.user_id)
         if user is None:
-            return
+            return False
         when = await self._when(uow, training)
         instead_text = (
             ru.DUTY_INSTEAD.format(name=html.escape(to_dto(instead).display_name))
             if instead
             else ""
         )
-        delivered = await send_direct(
+        return await send_direct(
             self._notifier,
             user,
             ru.DUTY_ASSIGNED_DM.format(
@@ -630,28 +796,18 @@ class DutyService:
             ),
             keyboard=[[_button(ru.DUTY_BTN_DECLINE, callbacks.DUTY_DECLINE, assignment.id)]],
         )
-        if delivered or announced:
-            return
-        destination = await resolve_destination(uow, training.squad_id, TopicPurpose.TRAININGS)
-        if destination is None:
-            return
-        await self._notifier.send_message(
-            destination.chat_id,
-            ru.DUTY_ASSIGNED_FALLBACK.format(
-                mention=to_dto(user).mention_html,
-                when=when,
-                instead=instead_text,
-                minutes=settings.duty_arrive_minutes,
-            ),
-            thread_id=destination.thread_id,
-            reply_to=training.duty_message_id,
-        )
 
-    async def _staff_prompt(self, uow: UnitOfWork, training: Training) -> Prompt:
+    async def _staff_prompt(
+        self, uow: UnitOfWork, training: Training, not_notified: Collection[int] = ()
+    ) -> Prompt:
         active = await self._active(uow, training)
         users = {u.id: u for u in await uow.users.list_by_ids([a.user_id for a in active])}
         squad = await uow.squads.get(training.squad_id)
-        names = "\n".join(f"• {html.escape(to_dto(users[a.user_id]).display_name)}" for a in active)
+        names = "\n".join(
+            f"• {html.escape(to_dto(users[a.user_id]).display_name)}"
+            + (ru.DUTY_NOT_NOTIFIED_MARK if a.user_id in not_notified else "")
+            for a in active
+        )
         keyboard: list[list[InlineButton]] = [
             [
                 _button(
@@ -698,9 +854,11 @@ class DutyService:
             keyboard,
         )
 
-    async def _send_staff_summary(self, uow: UnitOfWork, training: Training) -> None:
+    async def _send_staff_summary(
+        self, uow: UnitOfWork, training: Training, not_notified: Collection[int] = ()
+    ) -> None:
         """Капитану (нет капитана — тренеру) в личку: кто дежурит и кнопки управления."""
-        prompt = await self._staff_prompt(uow, training)
+        prompt = await self._staff_prompt(uow, training, not_notified)
         for roles in ([SquadRole.CAPTAIN], [SquadRole.COACH]):
             if await notify_staff(
                 uow,

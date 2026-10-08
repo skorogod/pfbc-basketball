@@ -1,6 +1,7 @@
 """Сборка Dispatcher: хранилище FSM, middleware, роутеры, меню команд."""
 
 from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -39,11 +40,16 @@ PRIVATE_COMMANDS = [
 def create_dispatcher(
     services: Services, session_factory: async_sessionmaker[AsyncSession]
 ) -> Dispatcher:
-    dp = Dispatcher(storage=PostgresStorage(session_factory))
+    # апдейты одного пользователя — по очереди: двойное нажатие не проходит один шаг диалога
+    # дважды (например, не создаёт два события с двумя постами в группе)
+    dp = Dispatcher(
+        storage=PostgresStorage(session_factory), events_isolation=SimpleEventIsolation()
+    )
     dp["services"] = services
 
     access = AccessMiddleware()
-    for observer in (dp.message, dp.callback_query, dp.poll_answer):
+    # poll_answer — без AccessMiddleware: участника состава опроса проверяет PollService
+    for observer in (dp.message, dp.callback_query):
         observer.outer_middleware(access)
 
     dp.include_routers(

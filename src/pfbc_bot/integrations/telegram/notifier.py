@@ -1,4 +1,9 @@
-"""Реализация порта Notifier на aiogram: retry с учётом retry_after, фолбэк на общий топик."""
+"""Реализация порта Notifier на aiogram: retry с учётом retry_after, фолбэк на общий топик.
+
+Ошибки Telegram (включая сетевые и 5xx) наружу не выходят: метод возвращает «не доставлено».
+Иначе исключение откатило бы транзакцию задачи вместе с отметкой «уже отправлено», и следующий
+тик повторил бы уже доставленные сообщения.
+"""
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
@@ -6,11 +11,7 @@ from typing import TypeVar
 
 from aiogram import Bot
 from aiogram.enums import ChatMemberStatus, ParseMode
-from aiogram.exceptions import (
-    TelegramBadRequest,
-    TelegramForbiddenError,
-    TelegramRetryAfter,
-)
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
 
 from pfbc_bot.logging import get_logger
@@ -102,8 +103,8 @@ class TelegramNotifier:
                     disable_web_page_preview=True,
                 ),
             )
-        except (TelegramForbiddenError, TelegramBadRequest, TelegramRetryAfter) as exc:
-            log.info("telegram_send_failed", chat_id=chat_id, error=str(exc))
+        except TelegramAPIError as exc:
+            log.warning("telegram_send_failed", chat_id=chat_id, error=str(exc))
             return None
         return message.message_id
 
@@ -126,8 +127,8 @@ class TelegramNotifier:
                 return True
             log.info("telegram_edit_failed", chat_id=chat_id, error=exc.message)
             return False
-        except (TelegramForbiddenError, TelegramRetryAfter) as exc:
-            log.info("telegram_edit_failed", chat_id=chat_id, error=str(exc))
+        except TelegramAPIError as exc:
+            log.warning("telegram_edit_failed", chat_id=chat_id, error=str(exc))
             return False
         return True
 
@@ -151,17 +152,25 @@ class TelegramNotifier:
                     message_thread_id=tid,
                 ),
             )
-        except (TelegramForbiddenError, TelegramBadRequest, TelegramRetryAfter) as exc:
+        except TelegramAPIError as exc:
             log.warning("telegram_poll_failed", chat_id=chat_id, error=str(exc))
             return None
         if message.poll is None:  # pragma: no cover - Telegram всегда возвращает poll
             return None
         return SentPoll(poll_id=message.poll.id, message_id=message.message_id)
 
+    async def stop_poll(self, chat_id: int, message_id: int) -> bool:
+        try:
+            await self._call(lambda: self._bot.stop_poll(chat_id, message_id))
+        except TelegramAPIError as exc:
+            log.info("telegram_stop_poll_failed", chat_id=chat_id, error=str(exc))
+            return False
+        return True
+
     async def is_chat_member(self, chat_id: int, tg_user_id: int) -> bool | None:
         try:
             member = await self._call(lambda: self._bot.get_chat_member(chat_id, tg_user_id))
-        except (TelegramForbiddenError, TelegramBadRequest, TelegramRetryAfter) as exc:
+        except TelegramAPIError as exc:
             if isinstance(exc, TelegramBadRequest) and "user not found" in exc.message.lower():
                 return False
             log.warning("telegram_get_member_failed", chat_id=chat_id, error=str(exc))

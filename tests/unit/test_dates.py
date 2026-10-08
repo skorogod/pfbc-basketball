@@ -6,12 +6,14 @@ from pfbc_bot.domain.dates import (
     birthday_offsets,
     dates_for_weekday,
     due_reminder_offsets,
+    duty_assign_at,
     is_birthday,
     local_to_utc,
     overlaps,
     parse_date,
     parse_local_datetime,
     parse_schedule_line,
+    training_poll_at,
 )
 
 MSK = "Europe/Moscow"
@@ -143,3 +145,67 @@ def test_local_to_utc_uses_squad_timezone() -> None:
     assert local_to_utc(date(2026, 10, 10), time(12, 0), MSK) == datetime(
         2026, 10, 10, 9, 0, tzinfo=UTC
     )
+
+
+@pytest.mark.parametrize(
+    ("hour", "minute", "poll_day_offset", "poll_hour"),
+    [
+        (19, 0, 0, 9),  # обычная — опрос в 09:00 в день тренировки
+        (14, 1, 0, 9),  # позже 14:00 — обычная
+        (14, 0, -1, 21),  # до 14:00 включительно — ранняя: опрос накануне в 21:00
+        (11, 59, -1, 21),
+        (8, 0, -1, 21),
+    ],
+)
+def test_training_poll_at(hour: int, minute: int, poll_day_offset: int, poll_hour: int) -> None:
+    day = date(2026, 10, 6)
+    starts = local_to_utc(day, time(hour, minute), MSK)
+    expected = local_to_utc(day + timedelta(days=poll_day_offset), time(poll_hour), MSK)
+    assert (
+        training_poll_at(
+            starts_at=starts,
+            tz=MSK,
+            poll_time=time(9),
+            eve_time=time(21),
+            duty_lead=timedelta(hours=3),
+            early_until=time(14),
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("hour", "minute", "assign_hour", "assign_minute"),
+    [
+        (19, 0, 16, 0),  # обычная — за 3 часа
+        (14, 1, 11, 1),  # позже 14:00 — по обычному правилу
+        (14, 0, 8, 0),  # до 14:00 включительно — утром в 08:00
+        (11, 0, 8, 0),
+        (8, 15, 8, 0),  # успевают прийти за 15 минут
+        (8, 10, 5, 10),  # слишком рано для утреннего назначения — за 3 часа
+    ],
+)
+def test_duty_assign_at(hour: int, minute: int, assign_hour: int, assign_minute: int) -> None:
+    day = date(2026, 10, 6)
+    assert duty_assign_at(
+        starts_at=local_to_utc(day, time(hour, minute), MSK),
+        tz=MSK,
+        poll_time=time(9),
+        duty_lead=timedelta(hours=3),
+        early_until=time(14),
+        morning_time=time(8),
+        arrive_before=timedelta(minutes=15),
+    ) == local_to_utc(day, time(assign_hour, assign_minute), MSK)
+
+
+def test_long_duty_lead_makes_training_early() -> None:
+    """Дежурных пришлось бы назначать раньше опроса — тренировка тоже «ранняя»."""
+    starts = local_to_utc(date(2026, 10, 6), time(17, 0), MSK)
+    assert training_poll_at(
+        starts_at=starts,
+        tz=MSK,
+        poll_time=time(9),
+        eve_time=time(21),
+        duty_lead=timedelta(hours=10),
+        early_until=time(14),
+    ) == local_to_utc(date(2026, 10, 5), time(21), MSK)

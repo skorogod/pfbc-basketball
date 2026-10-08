@@ -301,6 +301,8 @@ async def _create(
     message: Message, ctx: UserContext, services: Services, state: FSMContext
 ) -> None:
     data = await state.get_data()
+    # состояние — до создания: повторный шаг (двойное нажатие) не создаст второе событие
+    await state.clear()
     try:
         event = await services.events.create(
             ctx,
@@ -318,9 +320,9 @@ async def _create(
         )
     except ScheduleConflictError as exc:
         # пока заполняли форму, появилось новое пересечение — спрашиваем ещё раз
+        await state.set_data(data)
         await _warn_conflicts(message, state, exc.conflicts, exc.tz, final=True)
         return
-    await state.clear()
     squad = await services.squads.get(event.squad_id)
     text = ru.EVENT_CREATED.format(event=format_event_line(event, squad.name, squad.timezone))
     if event.notify_group:

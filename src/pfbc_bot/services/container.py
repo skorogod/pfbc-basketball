@@ -37,8 +37,8 @@ def build_services(
     uow_factory: UowFactory, notifier: Notifier, admin_tg_ids: Iterable[int]
 ) -> Services:
     admin_ids = frozenset(admin_tg_ids)
-    membership = MembershipService(uow_factory, notifier, admin_ids)
     duty = DutyService(uow_factory, notifier)
+    membership = MembershipService(uow_factory, notifier, admin_ids, duty=duty)
     return Services(
         access=AccessService(uow_factory, admin_ids),
         admins=AdminService(uow_factory, admin_ids),
@@ -48,7 +48,7 @@ def build_services(
         settings=SettingsService(uow_factory),
         trainings=TrainingService(uow_factory, notifier),
         duty=duty,
-        polls=PollService(uow_factory, notifier, duty),
+        polls=PollService(uow_factory, notifier, duty, membership),
         birthdays=BirthdayService(uow_factory, notifier),
         events=EventService(uow_factory, notifier),
     )

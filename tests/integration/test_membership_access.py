@@ -1,15 +1,19 @@
 """ФТ-0: членство в группе — источник правды; доступ, уход, повторное вступление."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
-from pfbc_bot.domain.enums import MembershipStatus, SquadRole, UserStatus
+from pfbc_bot.domain.dates import local_to_utc
+from pfbc_bot.domain.enums import MembershipStatus, PollType, SquadRole, UserStatus
 from pfbc_bot.repositories.uow import UowFactory
+from pfbc_bot.schemas.trainings import TrainingCreate
 from pfbc_bot.services.container import Services
+from pfbc_bot.services.membership import DISCOVERED_FIRST_JOINED_AT
 
 from .conftest import ADMIN_TG_ID, FakeNotifier
 from .helpers import CHAT_ID, ctx_of, join, setup_squad, tg
 
 T0 = datetime(2026, 1, 10, 12, 0, tzinfo=UTC)
+SECOND_CHAT = -100600
 
 
 async def test_stranger_has_no_access(services: Services) -> None:
@@ -112,3 +116,73 @@ async def test_anonymize_after_retention(services: Services, uow_factory: UowFac
         user = await uow.users.get_by_tg_id(1)
         assert user is not None
         assert user.status == UserStatus.ANONYMIZED and user.first_name is None
+
+
+async def _training_poll(
+    services: Services, uow_factory: UowFactory, squad_id: int, chat_id: int
+) -> str:
+    """Тренировка через неделю и опубликованный опрос на неё; возвращает tg_poll_id."""
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    starts = local_to_utc(date(2026, 10, 12), time(19), "Europe/Moscow")
+    training = await services.trainings.add_one_off(
+        admin,
+        TrainingCreate(squad_id=squad_id, starts_at=starts, venue="Зал"),
+        now=starts - timedelta(days=7),
+    )
+    assert await services.polls.publish_training_polls(now=starts - timedelta(hours=10)) == 1
+    async with uow_factory() as uow:
+        poll = await uow.polls.get_for_ref(PollType.TRAINING, "training", training.id)
+        assert poll is not None and poll.chat_id == chat_id
+        return poll.tg_poll_id
+
+
+async def test_poll_vote_discovers_member_who_joined_before_bot(
+    services: Services, notifier: FakeNotifier, uow_factory: UowFactory
+) -> None:
+    squad = await setup_squad(services)
+    poll_id = await _training_poll(services, uow_factory, squad.id, CHAT_ID)
+    notifier.chat_members[CHAT_ID] = {7}  # в группе с давних пор, бот о нём не знает
+
+    await services.polls.record_answer(poll_id, 7, [0], profile=tg(7, "Пётр"))
+    async with uow_factory() as uow:  # имя — из ответа на опрос
+        user = await uow.users.get_by_tg_id(7)
+        assert user is not None and user.first_name == "Пётр"
+    ctx = await ctx_of(services, 7)
+    assert ctx.is_member
+    async with uow_factory() as uow:
+        member = await uow.members.get(ctx.user.id, squad.id)
+        assert member is not None
+        # дата вступления неизвестна — новичком не считается (иначе 14 дней без дежурств)
+        assert member.first_joined_at == DISCOVERED_FIRST_JOINED_AT
+        poll = await uow.polls.get_by_tg_id(poll_id)
+        assert poll is not None
+        assert await uow.polls.answers(poll.id) == {ctx.user.id: [0]}
+
+
+async def test_poll_vote_from_outsider_is_ignored_and_cached(
+    services: Services, notifier: FakeNotifier, uow_factory: UowFactory
+) -> None:
+    squad = await setup_squad(services)
+    poll_id = await _training_poll(services, uow_factory, squad.id, CHAT_ID)
+
+    await services.polls.record_answer(poll_id, 8, [0])
+    assert await services.access.load_context(tg(8)) is None
+    # отрицательный ответ закеширован: повторный голос не идёт в Telegram
+    notifier.chat_members[CHAT_ID] = {8}
+    await services.polls.record_answer(poll_id, 8, [1])
+    assert await services.access.load_context(tg(8)) is None
+
+
+async def test_poll_vote_discovers_membership_in_second_squad(
+    services: Services, notifier: FakeNotifier, uow_factory: UowFactory
+) -> None:
+    """Игрок известен боту по одному составу, а в группе второго был ещё до бота."""
+    await setup_squad(services)
+    await join(services, 1, at=T0)
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    youth = await services.squads.bind_chat(admin, SECOND_CHAT, "PFBC Юниоры", "Юниоры")
+    poll_id = await _training_poll(services, uow_factory, youth.id, SECOND_CHAT)
+    notifier.chat_members[SECOND_CHAT] = {1}
+
+    await services.polls.record_answer(poll_id, 1, [0])
+    assert set((await ctx_of(services, 1)).squad_ids) == {1, youth.id}

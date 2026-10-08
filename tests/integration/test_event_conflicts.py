@@ -154,3 +154,30 @@ async def test_publication_goes_to_matching_topic(
     assert len(posts) == 1  # без флага публикации пост не делается
     assert posts[0].thread_id == GAMES_THREAD
     assert "Товарищеская игра" in posts[0].text and "12:00–13:30" in posts[0].text
+
+
+async def test_deleting_upcoming_published_event_notifies_team(
+    services: Services, squad_id: int, notifier: FakeNotifier
+) -> None:
+    actor = await captain(services)
+    published = await services.events.create(
+        actor, event(squad_id, at(12), 90, title="Сбор", notify_group=True), now=NOW
+    )
+    quiet = await services.events.create(actor, event(squad_id, at(9), 30, title="Тихое"), now=NOW)
+    group_before = len(notifier.to(CHAT_ID))
+
+    await services.events.delete(actor, published.id, now=NOW)
+    cancelled = notifier.to(CHAT_ID)[group_before:]
+    assert len(cancelled) == 1 and "Отменено" in cancelled[0].text and "Сбор" in cancelled[0].text
+    assert "Сбор" in notifier.to(COACH)[-1].text
+
+    # неопубликованное — только тренерам и капитанам; прошедшее — без сообщений
+    await services.events.delete(actor, quiet.id, now=NOW)
+    assert len(notifier.to(CHAT_ID)) == group_before + 1
+    assert "Тихое" in notifier.to(COACH)[-1].text
+    past = await services.events.create(
+        actor, event(squad_id, at(21), 30, title="Позднее"), now=NOW
+    )
+    sent = len(notifier.messages)
+    await services.events.delete(actor, past.id, now=at(22))
+    assert len(notifier.messages) == sent

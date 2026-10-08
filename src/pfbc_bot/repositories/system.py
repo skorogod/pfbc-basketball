@@ -1,6 +1,6 @@
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,10 @@ class SystemRepository:
             .returning(ReminderLog.id)
         )
         return (await self._session.scalar(stmt)) is not None
+
+    async def release_reminder(self, key: str) -> None:
+        """Снимает отметку: событие изменилось (перенос) или отправка не удалась — повторить."""
+        await self._session.execute(delete(ReminderLog).where(ReminderLog.key == key))
 
     async def count_reminders(self, key_prefix: str) -> int:
         stmt = (

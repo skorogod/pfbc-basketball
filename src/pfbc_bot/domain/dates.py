@@ -184,3 +184,62 @@ def due_reminder_offsets(
         if fire_at <= now < fire_at + grace:
             due.append(offset)
     return due
+
+
+def is_early_training(
+    *, starts_at: datetime, tz: str, poll_time: time, duty_lead: timedelta, early_until: time
+) -> bool:
+    """Ранняя тренировка: начинается не позже early_until (включительно) по местному времени.
+    Ранней считается и любая, на которую дежурных пришлось бы назначать раньше утреннего опроса
+    (например, при большом duty_lead) — иначе их не из кого было бы выбрать."""
+    local = to_local(starts_at, tz)
+    poll_same_day = local_to_utc(local.date(), poll_time, tz)
+    return local.time() <= early_until or starts_at - duty_lead < poll_same_day
+
+
+def training_poll_at(
+    *,
+    starts_at: datetime,
+    tz: str,
+    poll_time: time,
+    eve_time: time,
+    duty_lead: timedelta,
+    early_until: time,
+) -> datetime:
+    """Когда публиковать опрос: в poll_time в день тренировки, для ранней — накануне в eve_time."""
+    day = to_local(starts_at, tz).date()
+    if is_early_training(
+        starts_at=starts_at,
+        tz=tz,
+        poll_time=poll_time,
+        duty_lead=duty_lead,
+        early_until=early_until,
+    ):
+        return local_to_utc(day - timedelta(days=1), eve_time, tz)
+    return local_to_utc(day, poll_time, tz)
+
+
+def duty_assign_at(
+    *,
+    starts_at: datetime,
+    tz: str,
+    poll_time: time,
+    duty_lead: timedelta,
+    early_until: time,
+    morning_time: time,
+    arrive_before: timedelta,
+) -> datetime:
+    """Когда назначать дежурных: за duty_lead до начала, а на раннюю тренировку — утром в
+    morning_time (опрос был накануне). Если к утру дежурные уже не успевают прийти заранее
+    (тренировка совсем рано), — по обычному правилу."""
+    usual = starts_at - duty_lead
+    if not is_early_training(
+        starts_at=starts_at,
+        tz=tz,
+        poll_time=poll_time,
+        duty_lead=duty_lead,
+        early_until=early_until,
+    ):
+        return usual
+    morning = local_to_utc(to_local(starts_at, tz).date(), morning_time, tz)
+    return morning if morning <= starts_at - arrive_before else usual

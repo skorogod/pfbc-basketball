@@ -1,4 +1,9 @@
-"""AccessMiddleware (ФТ-0): первым в цепочке проверяет членство и кладёт права в data['ctx']."""
+"""AccessMiddleware (ФТ-0): первым в цепочке проверяет членство и кладёт права в data['ctx'].
+
+Участника, вступившего в группу до подключения бота, middleware находит: по сообщению в группе
+(автор — участник) или по /start в личке (проверка через Telegram). Ответы на опросы проверяет
+PollService.
+"""
 
 import time
 from collections.abc import Awaitable, Callable
@@ -24,6 +29,18 @@ def to_telegram_user(user: TgUser) -> TelegramUser:
     )
 
 
+def _group_message_chat(event: TelegramObject) -> int | None:
+    """ID группы, если это сообщение участника в группе. Служебное «вышел из группы» — не в счёт:
+    его автор уже не участник."""
+    if (
+        isinstance(event, Message)
+        and event.chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}
+        and event.left_chat_member is None
+    ):
+        return event.chat.id
+    return None
+
+
 def _is_private_start(event: TelegramObject) -> bool:
     return (
         isinstance(event, Message)
@@ -44,6 +61,12 @@ class AccessMiddleware(BaseMiddleware):
         services: Services = data["services"]
         user = to_telegram_user(tg_user)
         ctx = await services.access.load_context(user)
+        # автор сообщения в группе состава — её участник, даже если вступил до подключения бота
+        chat_id = _group_message_chat(event)
+        if chat_id is not None and await services.membership.on_group_message(
+            chat_id, user, ctx.squad_ids if ctx is not None else []
+        ):
+            ctx = await services.access.load_context(user)
         # пользователь мог вступить в группу до подключения бота — проверяем через Telegram
         if (
             (ctx is None or not ctx.is_allowed)

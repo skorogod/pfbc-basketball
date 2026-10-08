@@ -1,11 +1,18 @@
-"""Синхронизация членства в составах с Telegram-группами — источник правды (ФТ-0)."""
+"""Синхронизация членства в составах с Telegram-группами — источник правды (ФТ-0).
+
+Списка участников группы Bot API не даёт. Бот узнаёт участника:
+- по событию вступления (chat_member) — с настоящей датой вступления;
+- если тот был в группе до подключения бота («найденный» участник): написал боту /start,
+  ответил в опросе бота (проверка через getChatMember) или написал в группе (уже участник).
+  Дата его вступления неизвестна, поэтому новичком (ФТ-3) он не считается.
+"""
 
 import asyncio
 import html
 import time as monotonic_time
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from pfbc_bot.db.models import SquadMember, User
 from pfbc_bot.domain.dates import utcnow
@@ -21,11 +28,16 @@ from pfbc_bot.repositories.uow import UnitOfWork, UowFactory
 from pfbc_bot.schemas.squads import SquadDTO
 from pfbc_bot.schemas.users import TelegramUser, UserDTO
 from pfbc_bot.services.common import notify_admins, to_dto
+from pfbc_bot.services.duty import DutyService
 from pfbc_bot.services.ports import Notifier
 from pfbc_bot.services.settings import load_global_settings
 from pfbc_bot.texts import ru
 
 log = get_logger(__name__)
+
+# «Найденный» участник был в группе до подключения бота: настоящая дата вступления неизвестна,
+# но он точно не новичок — иначе после запуска бота вся команда 14 дней не дежурила бы.
+DISCOVERED_FIRST_JOINED_AT = datetime(2000, 1, 1, tzinfo=UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,18 +54,27 @@ class MembershipService:
         notifier: Notifier,
         admin_tg_ids: Iterable[int],
         *,
+        duty: DutyService | None = None,
         negative_cache_ttl: timedelta = timedelta(minutes=10),
     ) -> None:
         self._uow_factory = uow_factory
         self._notifier = notifier
+        self._duty = duty
         self._admin_tg_ids = frozenset(admin_tg_ids)
         self._negative_ttl = negative_cache_ttl.total_seconds()
         self._negative_cache: dict[int, float] = {}
+        self._negative_chat_cache: dict[tuple[int, int], float] = {}
 
     # --- события Telegram ---
     async def on_join(
-        self, chat_id: int, tg_user: TelegramUser, *, now: datetime | None = None
+        self,
+        chat_id: int,
+        tg_user: TelegramUser,
+        *,
+        now: datetime | None = None,
+        discovered: bool = False,
     ) -> JoinResult | None:
+        """Вступление в группу. discovered — участник найден, а не замечен при вступлении."""
         if tg_user.is_bot:
             return None
         now = now or utcnow()
@@ -65,7 +86,7 @@ class MembershipService:
             if squad is None:
                 return None
             user = await self._get_or_create_user(uow, tg_user)
-            first_time = await self._activate(uow, user, squad.id, now)
+            first_time = await self._activate(uow, user, squad.id, now, discovered=discovered)
             await uow.commit()
             self._negative_cache.pop(tg_user.tg_user_id, None)
             log.info("member_joined", user_id=user.id, squad_id=squad.id, first_time=first_time)
@@ -84,8 +105,11 @@ class MembershipService:
             user = await uow.users.get_by_tg_id(tg_user_id)
             if chat is None or user is None:
                 return
-            await self._deactivate(uow, user, chat.squad_id, removed=removed, now=now)
+            left = await self._deactivate(uow, user, chat.squad_id, removed=removed, now=now)
             await uow.commit()
+            user_id, squad_id = user.id, chat.squad_id
+        if left:
+            await self._release_duties(user_id, squad_id, now)
 
     # --- доступ пользователей, вступивших до подключения бота ---
     async def verify_via_telegram(
@@ -111,9 +135,47 @@ class MembershipService:
         async with self._uow_factory() as uow:
             user = await self._get_or_create_user(uow, tg_user)
             for squad_id in found:
-                await self._activate(uow, user, squad_id, now)
+                await self._activate(uow, user, squad_id, now, discovered=True)
             await uow.commit()
         return True
+
+    async def verify_in_chat(
+        self, chat_id: int, tg_user: TelegramUser, *, now: datetime | None = None
+    ) -> bool:
+        """Незнакомец ответил в опросе бота в группе chat_id: если Telegram подтверждает, что он
+        участник группы, — заводим. Отрицательный ответ кешируется (на пару пользователь–чат)."""
+        if tg_user.is_bot:
+            return False
+        key = (tg_user.tg_user_id, chat_id)
+        expires = self._negative_chat_cache.get(key)
+        if expires and expires > monotonic_time.monotonic():
+            return False
+        if not await self._notifier.is_chat_member(chat_id, tg_user.tg_user_id):
+            self._negative_chat_cache[key] = monotonic_time.monotonic() + self._negative_ttl
+            return False
+        joined = await self.on_join(chat_id, tg_user, now=now, discovered=True)
+        if joined is not None:
+            log.info("member_discovered", user_id=joined.user.id, squad_id=joined.squad.id)
+        return joined is not None
+
+    async def on_group_message(
+        self,
+        chat_id: int,
+        tg_user: TelegramUser,
+        known_squad_ids: Iterable[int],
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Автор сообщения в группе состава — её участник. Если бот не знал о его членстве в этом
+        составе (вступил до подключения бота), — заводим. True — членство только что заведено."""
+        async with self._uow_factory() as uow:
+            chat = await uow.squads.get_chat_by_chat_id(chat_id)
+        if chat is None or chat.squad_id in set(known_squad_ids):
+            return False
+        joined = await self.on_join(chat_id, tg_user, now=now, discovered=True)
+        if joined is not None:
+            log.info("member_discovered", user_id=joined.user.id, squad_id=joined.squad.id)
+        return joined is not None
 
     # --- плановые задачи ---
     async def reconcile(self, *, now: datetime | None = None, pause: float = 0.05) -> int:
@@ -125,6 +187,7 @@ class MembershipService:
                 for m, u, c in await uow.members.list_all_active_with_chat()
             ]
         fixed = 0
+        left: list[tuple[int, int]] = []
         for squad_id, tg_user_id, chat_id in rows:
             is_member = await self._notifier.is_chat_member(chat_id, tg_user_id)
             await asyncio.sleep(pause)
@@ -141,6 +204,7 @@ class MembershipService:
                     member.last_verified_at = now
                 else:
                     await self._deactivate(uow, user, squad_id, removed=False, now=now)
+                    left.append((user.id, squad_id))
                     await uow.system.audit(
                         actor_user_id=None,
                         action="membership.reconciled",
@@ -149,8 +213,15 @@ class MembershipService:
                     )
                     fixed += 1
                 await uow.commit()
+        for user_id, squad_id in left:
+            await self._release_duties(user_id, squad_id, now)
         log.info("membership_reconciled", checked=len(rows), fixed=fixed)
         return fixed
+
+    async def _release_duties(self, user_id: int, squad_id: int, now: datetime) -> None:
+        """Вышедший из группы исключается из очереди и снимается с будущих дежурств (ФТ-0)."""
+        if self._duty is not None:
+            await self._duty.handle_member_left(user_id, squad_id, now=now)
 
     async def anonymize_expired(self, *, now: datetime | None = None) -> int:
         now = now or utcnow()
@@ -186,7 +257,9 @@ class MembershipService:
         return user
 
     @staticmethod
-    async def _activate(uow: UnitOfWork, user: User, squad_id: int, now: datetime) -> bool:
+    async def _activate(
+        uow: UnitOfWork, user: User, squad_id: int, now: datetime, *, discovered: bool = False
+    ) -> bool:
         """Активирует членство. True — пользователь впервые в этом составе."""
         member = await uow.members.get(user.id, squad_id)
         first_time = member is None
@@ -196,7 +269,7 @@ class MembershipService:
                     user_id=user.id,
                     squad_id=squad_id,
                     status=MembershipStatus.ACTIVE,
-                    first_joined_at=now,
+                    first_joined_at=DISCOVERED_FIRST_JOINED_AT if discovered else now,
                     joined_at=now,
                     last_verified_at=now,
                 )
@@ -214,10 +287,11 @@ class MembershipService:
 
     async def _deactivate(
         self, uow: UnitOfWork, user: User, squad_id: int, *, removed: bool, now: datetime
-    ) -> None:
+    ) -> bool:
+        """Закрывает активное членство. True — было активным и закрыто."""
         member = await uow.members.get(user.id, squad_id)
         if member is None or member.status != MembershipStatus.ACTIVE:
-            return
+            return False
         member.status = MembershipStatus.REMOVED if removed else MembershipStatus.LEFT
         member.left_at = now
 
@@ -259,6 +333,7 @@ class MembershipService:
             payload={"squad_id": squad_id, "staff_roles_removed": sorted(staff_roles)},
         )
         log.info("member_left", user_id=user.id, squad_id=squad_id, removed=removed)
+        return True
 
 
 def anonymize(user: User) -> None:

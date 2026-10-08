@@ -3,6 +3,9 @@
 - За 7, 3 и 1 день (настраивается) тренер и капитан состава получают в личку сводку о
   предстоящих днях рождения игроков — чтобы успеть подготовить поздравление.
 - В сам день рождения — только сообщение в топик «Поздравления».
+
+Отметка «отправлено» фиксируется до отправки, отдельно для каждого сообщения: сбой посередине
+не приводит к повторным поздравлениям на следующем тике.
 """
 
 import html
@@ -52,18 +55,22 @@ class BirthdayService:
                     today, settings.birthday_time, squad.timezone
                 ):
                     continue
-                for _, user in await uow.members.list_active_for_squad(squad_id):
-                    if user.status != UserStatus.ACTIVE or user.birth_date is None:
-                        continue
-                    if not is_birthday(user.birth_date, today):
-                        continue
-                    key = f"birthday:{user.id}:{squad_id}:{today.year}"
+                celebrants = [
+                    (user.id, to_dto(user).mention_html)
+                    for _, user in await uow.members.list_active_for_squad(squad_id)
+                    if user.status == UserStatus.ACTIVE
+                    and user.birth_date is not None
+                    and is_birthday(user.birth_date, today)
+                ]
+            for user_id, mention in celebrants:
+                async with self._uow_factory() as uow:
+                    key = f"birthday:{user_id}:{squad_id}:{today.year}"
                     if not await uow.system.claim_reminder(key, "birthday"):
                         continue
-                    text = self._rng.choice(templates).format(name=to_dto(user).mention_html)
+                    await uow.commit()
+                    text = self._rng.choice(templates).format(name=mention)
                     await send_to_squad(uow, self._notifier, squad_id, TopicPurpose.GREETINGS, text)
                     sent += 1
-                await uow.commit()
         return sent
 
     async def send_staff_reminders(self, *, now: datetime | None = None) -> int:
@@ -106,6 +113,7 @@ class BirthdayService:
                         )
                         upcoming.append((user.id, line))
 
+                await uow.commit()  # отметки — до рассылки
                 if upcoming:
                     header = ru.BIRTHDAY_STAFF_HEADER.format(squad=html.escape(squad.name))
                     staff = await uow.members.users_with_roles(squad_id, STAFF_ROLES)

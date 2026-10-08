@@ -94,6 +94,31 @@ async def test_birthday_greeting_once_in_greetings_topic(
     assert greeting.thread_id == GREETINGS_THREAD and "tg://user?id=1" in greeting.text
 
 
+async def test_crash_during_birthdays_does_not_repeat_greetings(
+    services: Services, notifier: FakeNotifier, uow_factory: UowFactory
+) -> None:
+    await setup_squad(services)
+    for tg_id in (1, 2, 3):
+        await join(services, tg_id, at=LONG_AGO)
+    today = date(2026, 10, 5)
+    async with uow_factory() as uow:
+        for tg_id in (1, 2, 3):
+            user = await uow.users.get_by_tg_id(tg_id)
+            assert user is not None
+            user.birth_date, user.status = date(2000, 10, 5), UserStatus.ACTIVE
+        await uow.commit()
+
+    notifier.crash_on = {2}  # первое поздравление ушло, на втором — сбой
+    with pytest.raises(RuntimeError):
+        await services.birthdays.send_due(now=at(today, 10))
+    await services.birthdays.send_due(now=at(today, 10, 5))
+    greeted = [m.text for m in notifier.to(CHAT_ID)]
+    # каждый — не больше одного раза (упавшее не повторяется: лучше пропустить, чем задвоить)
+    for tg_id in (1, 2, 3):
+        assert sum(f'tg://user?id={tg_id}"' in t for t in greeted) <= 1
+    assert len(greeted) == 2
+
+
 async def test_staff_get_birthday_heads_up_7_3_1_days_before(
     services: Services, notifier: FakeNotifier, uow_factory: UowFactory
 ) -> None:
