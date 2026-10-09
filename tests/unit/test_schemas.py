@@ -1,14 +1,16 @@
-from datetime import date, time
+from datetime import UTC, date, datetime, time
 
 import pytest
 from pydantic import ValidationError
 
 from pfbc_bot import callbacks
-from pfbc_bot.domain.enums import SquadRole, UserStatus
+from pfbc_bot.domain.enums import EventType, SquadRole, UserStatus
+from pfbc_bot.schemas.events import EventCreate
 from pfbc_bot.schemas.settings import SquadSettings
 from pfbc_bot.schemas.squads import UserContext
-from pfbc_bot.schemas.users import RegistrationData, UserDTO, validate_mtgame_url
+from pfbc_bot.schemas.users import RegistrationData, UserDTO, profile_link, validate_mtgame_url
 from pfbc_bot.services.errors import DomainError
+from pfbc_bot.services.events import format_tournament_period
 from pfbc_bot.services.settings import apply_override, has_setting
 
 
@@ -108,3 +110,28 @@ def test_callback_pack_parse_roundtrip() -> None:
     parsed = callbacks.parse(data)
     assert (parsed.prefix, parsed.action, parsed.args) == ("duty", "pick", (15, 42))
     assert len(data.encode()) <= 64
+
+
+def test_tournament_period_text() -> None:
+    start = datetime(2026, 10, 11, 21, 0, tzinfo=UTC)  # 12.10 00:00 МСК
+    assert format_tournament_period(start, 3, False, "Europe/Moscow") == (
+        "12.10.2026 – 14.10.2026 (3 дн.)"
+    )
+    assert format_tournament_period(start, 1, False, "Europe/Moscow") == "12.10.2026"
+    assert format_tournament_period(start, None, True, "Europe/Moscow") == "сезон, с 12.10.2026"
+    assert format_tournament_period(None, 2, False, "Europe/Moscow") == "дата уточняется, 2 дн."
+
+
+def test_tournament_needs_days_or_season() -> None:
+    with pytest.raises(ValueError, match="число дней или сезон"):
+        EventCreate(squad_id=1, type=EventType.TOURNAMENT, title="Кубок")
+    with pytest.raises(ValueError, match="дату и время"):
+        EventCreate(squad_id=1, type=EventType.MATCH, title="Матч")
+    assert EventCreate(squad_id=1, type=EventType.TOURNAMENT, title="ABL", is_season=True)
+
+
+def test_profile_link_prefers_username() -> None:
+    assert profile_link(5, "ivan_pfbc", "Иван <И>") == (
+        '<a href="https://t.me/ivan_pfbc">Иван &lt;И&gt;</a>'
+    )
+    assert profile_link(5, None, "Иван") == '<a href="tg://user?id=5">Иван</a>'

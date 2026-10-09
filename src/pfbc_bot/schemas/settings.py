@@ -15,6 +15,7 @@ class Features(BaseModel):
     birthdays: bool = True
     birthday_staff_reminders: bool = True
     event_reminders: bool = True
+    review_offers: bool = True  # после матча — тренеру предложение назначить разбор
 
 
 class SquadSettings(BaseModel):

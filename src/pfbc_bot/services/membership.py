@@ -305,7 +305,7 @@ class MembershipService:
                 self._notifier,
                 self._admin_tg_ids,
                 ru.STAFF_LEFT_ADMIN_NOTICE.format(
-                    name=html.escape(to_dto(user).display_name),
+                    name=to_dto(user).profile_html,
                     squad=html.escape(squad.name if squad else str(squad_id)),
                     roles=", ".join(ROLE_TITLES[r] for r in sorted(staff_roles)),
                 ),
@@ -323,7 +323,7 @@ class MembershipService:
                     uow,
                     self._notifier,
                     self._admin_tg_ids,
-                    ru.ADMIN_LOST_MEMBERSHIP.format(name=html.escape(to_dto(user).display_name)),
+                    ru.ADMIN_LOST_MEMBERSHIP.format(name=to_dto(user).profile_html),
                 )
         await uow.system.audit(
             actor_user_id=None,
@@ -341,6 +341,8 @@ def anonymize(user: User) -> None:
     user.full_name = None
     user.birth_date = None
     user.mtgame_url = None
+    user.phone = None
+    user.payment_details = None
     user.username = None
     user.first_name = None
     user.pd_consent_at = None

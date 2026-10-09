@@ -18,4 +18,4 @@ RUN useradd --create-home --uid 1000 bot
 USER bot
 
 EXPOSE 8080
-CMD ["python", "-m", "pfbc_bot.main_web"]
+CMD ["python", "-m", "pfbc_bot.main"]

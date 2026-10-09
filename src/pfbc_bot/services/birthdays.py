@@ -107,7 +107,7 @@ class BirthdayService:
                             days=days
                         )
                         line = ru.BIRTHDAY_STAFF_LINE.format(
-                            name=to_dto(user).mention_html,
+                            name=to_dto(user).profile_html,
                             date=f"{WEEKDAY_SHORT[target.weekday()]} {target:%d.%m}",
                             when=when,
                         )

@@ -11,6 +11,13 @@ ACCESS_DENIED = (
 )
 ACCESS_DENIED_CALLBACK = "Доступ только для участников команд PFBC"
 NO_PERMISSION = "Недостаточно прав для этого действия."
+NO_PERMISSION_FOR = (
+    "Недостаточно прав: «{title}». Права ролей настраивает админ — обратитесь к нему."
+)
+UNEXPECTED_ERROR = (
+    "Что-то пошло не так — действие не выполнено. Попробуйте ещё раз; если повторится, "
+    "сообщите админу."
+)
 DM_UNAVAILABLE = "Не могу написать вам в личку: откройте бота и нажмите /start."
 
 
@@ -28,9 +35,14 @@ REG_ASK_BIRTH = (
 REG_ASK_MTGAME = (
     'Ссылка на ваш профиль на <a href="https://mtgame.ru/">mtgame.ru</a>. Можно пропустить.'
 )
+REG_ASK_PHONE = (
+    "Телефон, например <code>+7 999 123-45-67</code> — чтобы тренер мог с вами связаться. "
+    "Можно пропустить."
+)
 REG_ASK_CONSENT = (
     "Последний шаг: согласие на обработку персональных данных (ФИО, дата рождения, ссылка на "
-    "профиль) для организации деятельности клуба. Данные можно удалить командой /delete_me."
+    "профиль, телефон) для организации деятельности клуба. Данные можно удалить командой "
+    "/delete_me."
 )
 REG_ASK_CONSENT_YOUTH = (
     REG_ASK_CONSENT
@@ -41,6 +53,7 @@ REG_DONE = "✅ Регистрация завершена. Спасибо, {name
 REG_DECLINED = "Без согласия регистрация невозможна. Вы можете вернуться к ней командой /start."
 REG_ALREADY = "Вы уже зарегистрированы. Профиль: /profile"
 BTN_SKIP = "Пропустить"
+BTN_CLEAR = "Очистить"
 BTN_CONSENT = "✅ Согласен(на)"
 BTN_CONSENT_GUARDIAN = "✅ Я законный представитель, согласен(на)"
 BTN_DECLINE = "Отказаться"
@@ -50,11 +63,15 @@ PROFILE = (
     "ФИО: {full_name}\n"
     "Дата рождения: {birth_date}\n"
     "mtgame: {mtgame}\n"
-    "Составы: {squads}"
+    "Телефон: {phone}\n"
+    "Составы: {squads}{payment}"
 )
+PROFILE_PAYMENT = "\nРеквизиты для сбора денег: {details}"
+PROFILE_BTN_PAYMENT = "💳 Реквизиты"
 PROFILE_UPDATED = "Сохранено ✅"
 DELETE_ME_CONFIRM = (
-    "Удалить ваши персональные данные (ФИО, дату рождения, ссылку mtgame)? "
+    "Удалить ваши персональные данные (ФИО, дату рождения, ссылку mtgame, телефон, "
+    "реквизиты)? "
     "Членство в составах сохранится, но вы перестанете получать поздравления."
 )
 DELETE_ME_DONE = "Данные удалены. Зарегистрироваться снова можно командой /start."
@@ -66,22 +83,36 @@ HELP_PLAYER = (
     "/events — ближайшие события\n"
     "/delete_me — удалить персональные данные"
 )
-HELP_STAFF = (
-    "\n\n<b>Тренер / капитан</b>\n"
-    "/schedule — расписание тренировок\n"
-    "/trainings — ближайшие тренировки (отмена, перенос)\n"
-    "/training_add — разовая тренировка\n"
-    "/attendance — кто придёт на тренировку\n"
-    "/duty — дежурные: замена и ручной выбор\n"
-    "/event_add — добавить событие в журнал\n"
-    "/event_del — удалить событие\n"
-    "/invite — ссылка на регистрацию для новичка"
-)
+HELP_FUNCTIONS = "\n\n<b>Ваши функции</b>"
+# право → строки справки (ключ — код права из domain.permissions)
+HELP_BY_PERMISSION: dict[str, str] = {
+    "schedule": (
+        "/schedule — расписание тренировок\n"
+        "/trainings — ближайшие тренировки (отмена, перенос)\n"
+        "/training_add — разовая тренировка"
+    ),
+    "training_poll": "/poll — опрос на тренировку (раньше времени или заново)",
+    "attendance": "/attendance — кто придёт: тренировки, матчи, турниры, разборы",
+    "duty": "/duty — дежурные: замена и ручной выбор",
+    "meetings": (
+        "/event_add — собрание команды\n/event_move — перенести\n/event_del — удалить событие"
+    ),
+    "events": (
+        "/event_add — матч, турнир, разбор, сборы и другие события\n"
+        "/event_move — перенести событие\n"
+        "/event_del — удалить событие\n"
+        "/review — назначить разбор игры (опрос «Буду / Не смогу»)\n"
+        "/tournaments — турниры: привязка матчей, стоимость игры"
+    ),
+    "game_payments": "/game_pay — сбор денег за игру: сумма, получатель, опрос «Оплатил»",
+    "invite": "/invite — ссылка на регистрацию для новичка",
+}
 HELP_ADMIN = (
     "\n\n<b>Админ</b>\n"
     "/squads — составы\n"
     "/roles — назначить тренера или капитана\n"
     "/admins — админы бота\n"
+    "/permissions — что могут тренер, капитан и игрок\n"
     "/settings, /set &lt;ключ&gt; &lt;значение&gt; — настройки\n"
     "В группе состава (разово): /bind &lt;название&gt;, "
     "/bind_topic &lt;назначение&gt; внутри топика"
@@ -128,6 +159,7 @@ SETTINGS_CHOOSE = "Чьи настройки показать?"
 SETTINGS_GLOBAL = "🌐 Глобальные"
 SETTINGS_UNKNOWN = "Неизвестная настройка: {key}. Список ключей: /settings"
 SETTINGS_SAVED = "✅ Настройка {key} = {value} сохранена ({scope})."
+SQUAD_MISSING_ROLES = "\n  ⚠️ Не назначен: {roles} — их сообщения получают админы (/roles)."
 SQUADS_EMPTY = (
     "Составов пока нет. Добавьте бота в группу состава и выполните там /bind &lt;название&gt;."
 )
@@ -169,6 +201,19 @@ SCHEDULE_BTN_CONFIRM_REMOVE = "Да, удалить"
 TRAINING_POLL_QUESTION = "🏀 Тренировка {when}, {venue}. Придёшь?"
 ATTENDANCE = "<b>Тренировка {when}</b>\n{lines}\nНе ответили: {missing}"
 ATTENDANCE_NO_POLL = "Опрос на эту тренировку ещё не публиковался."
+POLL_CONFIRM_START = (
+    "Опубликовать опрос на тренировку {when} сейчас? Бот сам его на эту тренировку "
+    "уже не опубликует."
+)
+POLL_CONFIRM_RESTART = (
+    "Опрос на тренировку {when} уже опубликован. Запустить новый? Старый будет закрыт, "
+    "ответы в нём учитываться не будут — участникам нужно ответить заново."
+)
+POLL_BTN_CONFIRM = "Да, опубликовать"
+POLL_STARTED = "✅ Опрос опубликован в группе."
+POLL_TRAINING_STARTED = "Тренировка уже началась — опрос на неё запустить нельзя."
+POLL_NO_CHAT = "Группа состава не привязана — опубликовать опрос некуда."
+POLL_NOT_SENT = "Не удалось опубликовать опрос в группе. Попробуйте ещё раз."
 
 # --- дежурства ---
 DUTY_ANNOUNCE = (
@@ -274,7 +319,8 @@ EVENT_ASK_PLACE = "Место (или «Пропустить»):"
 EVENT_ASK_DESCRIPTION = "Описание (или «Пропустить»):"
 EVENT_ASK_PUBLISH = (
     "Опубликовать событие в группе состава? Пост появится в соответствующем топике, "
-    "туда же будут приходить напоминания для команды."
+    "туда же будут приходить напоминания для команды. К матчу, турниру и разбору игры "
+    "добавится опрос участия."
 )
 EVENT_CONFLICT_HEADER = "⚠️ Время пересекается с уже запланированным:"
 EVENT_CONFLICT_LINE = "• {title} — {when}"
@@ -287,17 +333,205 @@ CONFLICT_MATCH = "Матч с {opponent}"
 CONFLICT_EVENT = "{type}: {title}"
 EVENT_CREATED = "✅ Событие добавлено:\n{event}"
 EVENT_PUBLISHED = "Опубликовано в группе состава."
+EVENT_PUBLISHED_WITH_POLL = "Опубликовано в группе состава вместе с опросом участия."
+EVENT_MOVED_GROUP = "🔁 <b>Перенесено — {type}: {title}</b>\n🕒 {old} → <b>{new}</b>{tournament}"
+EVENT_MOVE_PAST = "Перенести можно только будущее событие и только на будущее время."
+EVENT_MOVE_CHOOSE = "Какое событие перенести?"
+EVENT_MOVE_ASK_WHEN = (
+    "Новые дата и время: <code>дд.мм.гггг чч:мм</code>\n"
+    "Команда получит сообщение о переносе, опрос участия будет опубликован заново."
+)
+EVENT_MOVE_ASK_DATE = "Новая дата старта турнира: <code>дд.мм.гггг</code>"
+EVENT_MOVED = "✅ Перенесено: {when}"
+EVENT_NOT_PUBLISHED = (
+    "⚠️ В группу опубликовать не удалось: проверьте, что бот состоит в группе состава и "
+    "топик существует. Событие сохранено — его видно в /events."
+)
+EVENT_PUBLISHED_POLL_FAILED = (
+    "⚠️ Пост опубликован, а опрос участия — нет (Telegram не принял). Событие сохранено."
+)
 EVENT_DELETED = "✅ Событие удалено."
 EVENTS_HEADER = "<b>Ближайшие события</b>"
 EVENTS_EMPTY = "Ближайших событий нет."
 EVENT_LINE = "• {when} — <b>{title}</b> ({type}, {squad}){place}"
-EVENT_ANNOUNCE = "📅 <b>{type}: {title}</b>\n🕒 {when}{place}{description}"
-EVENT_CANCELLED = "❌ <b>Отменено — {type}: {title}</b>\n🕒 {when}"
-EVENT_REMINDER = "⏰ Напоминание{when_left}: <b>{title}</b>\n{when}{place}{description}"
+EVENT_POLL_QUESTION = "{type}: {title}{tournament}, {when}. Будешь?"
+TOURNAMENT_POLL_QUESTION = "🏆 Турнир: {title}, {when}. Участвуешь?"
+EVENT_ANNOUNCE = "📅 <b>{type}: {title}</b>\n🕒 {when}{place}{tournament}{description}"
+EVENT_CANCELLED = "❌ <b>Отменено — {type}: {title}</b>\n🕒 {when}{tournament}"
+EVENT_REMINDER = "⏰ Напоминание{when_left}: <b>{title}</b>\n{when}{place}{tournament}{description}"
+EVENT_TOURNAMENT = "🏆 Турнир: {title}"
+EVENT_POLL_TOURNAMENT = " (турнир «{title}»)"
+PERIOD_SEASON = "сезон, дата старта уточняется"
+PERIOD_SEASON_FROM = "сезон, с {start}"
+PERIOD_DAYS = "{start} – {end} ({days} дн.)"
+PERIOD_DAYS_TBD = "дата уточняется, {days} дн."
 EVENT_IN_DAYS = {0: " — сегодня", 1: " — завтра"}
 EVENT_IN_N_DAYS = " — через {days} дн."
+EVENT_ASK_WHEN_REVIEW = (
+    "Дата и время разбора: <code>дд.мм.гггг чч:мм</code> — или время по умолчанию кнопкой "
+    "(за час до первой тренировки недели)."
+)
+EVENT_ASK_WHEN_REVIEW_NO_DEFAULT = (
+    "Дата и время разбора: <code>дд.мм.гггг чч:мм</code>\n"
+    "(Ближайших тренировок нет — время по умолчанию предложить не могу.)"
+)
+EVENT_BTN_REVIEW_DEFAULT = "📅 {when} — за час до тренировки"
+REVIEW_TITLE_DEFAULT = "Разбор игры"
+TOURNAMENT_ASK_START = (
+    "Дата старта турнира: <code>дд.мм.гггг</code> — или кнопка, если она пока неизвестна."
+)
+MATCH_ASK_TOURNAMENT = "В рамках какого турнира матч?"
+MATCH_BTN_NO_TOURNAMENT = "Без турнира"
+TOURNAMENT_BTN_START_UNKNOWN = "Дата пока неизвестна"
+TOURNAMENT_ASK_LENGTH = "Сколько дней длится турнир? Введите число — или «Сезон» для лиги (ABL)."
+TOURNAMENT_BTN_SEASON = "🏆 Сезон"
+TOURNAMENT_BAD_LENGTH = "Число дней — от 1 до 366, или кнопка «Сезон»."
+EVENT_ATTENDANCE = "<b>{type}: {title}</b>, {when}\n{lines}\nНе ответили: {missing}"
+EVENT_NO_POLL = "Опрос по этому событию не публиковался."
+CHOOSE_TRAINING_OR_EVENT = "Чью сводку ответов показать?"
+ATTENDANCE_TRAININGS = "🏀 <b>Тренировки</b> — чью сводку показать?"
+ATTENDANCE_EVENTS = "📅 <b>Игры и события</b> — чью сводку показать?"
+EVENT_SUMMARY = "Проверьте: <b>{type}: {title}</b>\n🕒 {when}"
+ATTENDANCE_NOTHING = "Нет ближайших тренировок и событий с опросом."
+
+# --- турниры ---
+TOURNAMENTS_HEADER = "<b>Турниры</b> — выберите, чтобы привязать матчи:"
+TOURNAMENTS_EMPTY = "Турниров нет. Создайте событие «Турнир»: /event_add"
+TOURNAMENT_CARD = (
+    "🏆 <b>{title}</b> ({squad}), {when}\n"
+    "Стоимость одной игры: {price}\n"
+    "Матчи турнира отмечены ✅. Нажмите на матч, чтобы привязать или отвязать."
+)
+TOURNAMENT_BTN_GAME_PRICE = "💰 Изменить стоимость игры"
+TOURNAMENT_ASK_GAME_PRICE = (
+    "Стоимость одной игры в турнире (вся сумма за игру, например <code>15000</code>) — "
+    "по ней бот посчитает, сколько платит каждый игрок. Можно пропустить."
+)
+TOURNAMENT_ASK_GAME_PRICE_EDIT = (
+    "Новая стоимость одной игры (вся сумма за игру, например <code>15000</code>):"
+)
+TOURNAMENT_BTN_CLEAR_PRICE = "Убрать стоимость"
+TOURNAMENT_NO_MATCHES = "\n\nМатчей для привязки нет — создайте событие «Матч»: /event_add"
+TOURNAMENT_NOT_FOUND = "Турнир не найден."
+TOURNAMENT_MATCH_NOT_FOUND = "Матч не найден."
+TOURNAMENT_OTHER_SQUAD = "Матч другого состава — к этому турниру его не привязать."
+TOURNAMENT_MATCH_TAKEN = "Матч уже привязан к другому турниру — сначала отвяжите его там."
+
+# --- разбор игры после матча ---
+REVIEW_OFFER = (
+    "🏀 Матч прошёл:\n{match}\n\nНазначить разбор игры? Команда получит опрос «Буду / Не смогу»."
+)
+REVIEW_BTN_YES = "✅ Да, назначить разбор"
+REVIEW_BTN_NO = "Не нужно"
+REVIEW_PROPOSAL = (
+    "Разбор игры «{title}» — {when} (за час до первой тренировки недели). "
+    "Опубликовать в группе с опросом?"
+)
+REVIEW_PROPOSAL_NO_DEFAULT = (
+    "Ближайших тренировок нет — время по умолчанию не предложить. "
+    "Введите дату и время разбора: <code>дд.мм.гггг чч:мм</code>"
+)
+REVIEW_BTN_PUBLISH = "✅ Да, {when}"
+REVIEW_BTN_OTHER_TIME = "🕒 Другое время"
+REVIEW_ASK_TIME = "Дата и время разбора: <code>дд.мм.гггг чч:мм</code>"
+REVIEW_CREATED = "✅ Разбор назначен: {when}. Пост и опрос опубликованы в группе."
+REVIEW_ALREADY = "Разбор по этому матчу уже назначен."
+REVIEW_TITLE_FOR_MATCH = "Разбор игры: {title}"
 BTN_YES = "Да"
 BTN_NO = "Нет"
 BTN_CANCEL = "Отмена"
-CANCELLED = "Отменено."
+INPUT_CANCELLED = "Ввод прерван."
 PAST_DATE = "Дата уже прошла."
+
+# --- сбор денег за игру (не путать с оплатой тренировок по квитанциям) ---
+GAME_PAYMENT_EVENT = "{type}: <b>{title}</b>, {when}{tournament}"
+GAME_PAYMENT_POST = (
+    "💰 <b>Сбор за игру</b>\n\n{event}\n\n"
+    "<b>Сумма: {amount}</b>\n👤 Получатель: {collector}\n{details}{deadline}\n\n"
+    "Платят все, кто ответил «Буду (игрок)». После перевода отметьте «Оплатил» в опросе ниже."
+)
+GAME_PAYMENT_DEADLINE = "\n⏰ Оплатить до {when}"
+GAME_PAYMENT_POLL_QUESTION = "💰 Оплата игры «{title}»: {amount}"
+GAME_PAYMENT_REMINDER_DM = (
+    "💰 Напоминание об оплате игры\n{event}\n\n<b>Сумма: {amount}</b>\n{details}\n\n"
+    "Вы отметили «Буду (игрок)», но ещё не отметили «Оплатил» в опросе в группе. "
+    "После перевода отметьте, пожалуйста."
+)
+GAME_PAYMENT_REMINDER_GROUP = (
+    "💰 {names}, напоминание об оплате игры\n{event}\n<b>Сумма: {amount}</b>\n{details}\n"
+    "После перевода отметьте «Оплатил» в опросе."
+)
+GAME_PAYMENT_SUMMARY = (
+    "💰 Срок оплаты прошёл\n{event}\nОплатили: {paid} из {players}.\n"
+    "Не отметили оплату (им отправлено напоминание): {unpaid}"
+)
+GAME_PAYMENT_NO_PLAYERS = (
+    "💰 Срок оплаты прошёл\n{event}\nВ опросе участия никто не ответил «Буду (игрок)» — "
+    "напоминать некому."
+)
+GAME_PAYMENT_STATUS = (
+    "\n\n💰 <b>Оплата: {amount}</b>{deadline}{collector}\nОплатили ({paid_count}): {paid}\n"
+    "Не оплатили ({unpaid_count}): {unpaid}{others}"
+)
+GAME_PAYMENT_STATUS_OTHERS = "\nОплатили, но не отмечены игроками: {names}"
+GAME_PAYMENT_CHOOSE_MATCH = "За какую игру собираем деньги?"
+GAME_PAYMENT_NO_MATCHES = "Нет матчей для сбора денег. Создайте матч: /event_add"
+GAME_PAYMENT_ASK_AMOUNT = "Сумма с каждого игрока в рублях, например <code>2500</code>:"
+GAME_PAYMENT_BTN_SUGGESTED = "{amount} — {price} ÷ {players} игр."
+GAME_PAYMENT_ASK_DEADLINE = (
+    "До какого времени оплатить? Кнопка — сутки, или введите <code>дд.мм.гггг чч:мм</code>. "
+    "После срока бот напомнит тем, кто не отметил оплату."
+)
+GAME_PAYMENT_BTN_DAY = "⏰ Сутки — до {when}"
+GAME_PAYMENT_BTN_NO_DEADLINE = "Без срока"
+GAME_PAYMENT_ASK_COLLECTOR = "Кто собирает деньги? Переводить будут на его реквизиты."
+GAME_PAYMENT_ME = " (я)"
+GAME_PAYMENT_COLLECTOR_DETAILS = (
+    "Реквизиты получателя {name}:\n{details}\n\nПроверьте — использовать их?"
+)
+GAME_PAYMENT_COLLECTOR_NO_DETAILS = "У {name} нет сохранённых реквизитов — введите их."
+GAME_PAYMENT_BTN_USE = "✅ Использовать"
+GAME_PAYMENT_ASK_COLLECTOR_HINT = (
+    "\nВ списке — вы и тренеры и админы состава, которые сами указали реквизиты в /profile."
+)
+GAME_PAYMENT_OTHER_DETAILS = (
+    "Реквизиты получателя {name}:\n{details}\n\n"
+    "Их задаёт и меняет только сам получатель (в /profile). Проверьте и используйте:"
+)
+GAME_PAYMENT_COLLECTOR_NOT_ALLOWED = (
+    "Получателем можно выбрать себя или тренера/админа состава, который сам указал реквизиты."
+)
+GAME_PAYMENT_BTN_NEW_DETAILS = "✏️ Ввести новые"
+GAME_PAYMENT_PREVIEW = (
+    "Так будет выглядеть пост в группе:\n\n{post}\n\nОпубликовать с опросом «Оплатил»?"
+)
+GAME_PAYMENT_BTN_PUBLISH = "✅ Опубликовать"
+GAME_PAYMENT_CREATED = "✅ Сбор опубликован в группе."
+GAME_PAYMENT_NOT_SENT = (
+    "Не удалось опубликовать сбор в группе (пост или опрос не приняты Telegram). "
+    "Сбор не создан — попробуйте ещё раз."
+)
+
+# --- права ролей ---
+PERMISSIONS_CHOOSE_ROLE = (
+    "<b>Права ролей</b> — что может каждая роль во всех составах. Админ может всё.\nВыберите роль:"
+)
+PERMISSIONS_ROLE = (
+    "<b>Роль: {role}</b>\nНажмите на функцию, чтобы включить ✅ или выключить ▫️. "
+    "Изменения действуют сразу."
+)
+PERMISSIONS_BTN_RESET = "↩️ Сбросить по умолчанию"
+PERMISSION_LOCKED = "Это право закреплено за тренером — другой роли его не выдать."
+PERMISSION_LOCKED_MARK = "🔒"
+
+# --- реквизиты ---
+DETAILS_ASK_METHOD = (
+    "Как переводить деньги? Реквизиты увидят все участники группы — в посте о сборе."
+)
+DETAILS_BTN_PHONE = "📱 По номеру телефона"
+DETAILS_BTN_CARD = "💳 По номеру карты"
+DETAILS_ASK_PHONE = "Номер телефона для перевода, например <code>+7 999 123-45-67</code>:"
+DETAILS_BTN_MY_PHONE = "Телефон из профиля: {phone}"
+DETAILS_ASK_CARD = "Номер карты, например <code>2202 2000 1234 5678</code>:"
+DETAILS_ASK_BANK = "Банк, например <code>Сбербанк</code> или <code>Т-Банк</code>:"
+DETAILS_SAVED = "✅ Реквизиты сохранены:\n{details}"

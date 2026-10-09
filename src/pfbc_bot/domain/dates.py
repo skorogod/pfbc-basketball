@@ -243,3 +243,23 @@ def duty_assign_at(
         return usual
     morning = local_to_utc(to_local(starts_at, tz).date(), morning_time, tz)
     return morning if morning <= starts_at - arrive_before else usual
+
+
+def review_default_at(
+    training_starts: Iterable[datetime], *, tz: str, now: datetime, lead: timedelta
+) -> datetime | None:
+    """Время разбора игры по умолчанию: за lead до первой тренировки недели (пн–вс по времени
+    состава). Если на этой неделе первая тренировка уже прошла (или до неё меньше lead), —
+    первая тренировка следующей недели, где она ещё впереди.
+
+    training_starts — тренировки начиная с понедельника текущей недели: иначе первой тренировкой
+    недели посчитается не первая, а первая из ещё не прошедших."""
+    first_by_week: dict[date, datetime] = {}
+    for starts_at in sorted(training_starts):
+        local_day = to_local(starts_at, tz).date()
+        first_by_week.setdefault(local_day - timedelta(days=local_day.weekday()), starts_at)
+    for week in sorted(first_by_week):
+        review_at = first_by_week[week] - lead
+        if review_at > now:
+            return review_at
+    return None

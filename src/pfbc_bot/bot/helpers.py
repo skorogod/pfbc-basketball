@@ -1,28 +1,37 @@
 """Общие помощники хэндлеров."""
 
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InaccessibleMessage, Message
 
 from pfbc_bot.bot.keyboards.common import squads_keyboard
-from pfbc_bot.domain.enums import SquadRole
+from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.schemas.squads import SquadDTO, UserContext
 from pfbc_bot.services.container import Services
 from pfbc_bot.texts import ru
 
 
 async def available_squads(
-    ctx: UserContext, services: Services, *roles: SquadRole
+    ctx: UserContext, services: Services, *permissions: Permission
 ) -> list[SquadDTO]:
-    """Составы, где у пользователя есть одна из ролей. Админу — все активные составы."""
+    """Составы, где у пользователя есть хотя бы одно из прав (без прав — все его составы).
+    Админу — все активные составы."""
     if ctx.is_admin:
         return [o.squad for o in await services.squads.overview()]
-    return await services.squads.get_many(ctx.squads_with_roles(*roles))
+    squad_ids = [
+        sid for sid in ctx.squad_ids if not permissions or any(ctx.can(sid, p) for p in permissions)
+    ]
+    return await services.squads.get_many(squad_ids)
 
 
 async def ask_squad(
-    message: Message, ctx: UserContext, services: Services, flow: str, *roles: SquadRole
+    message: Message,
+    ctx: UserContext,
+    services: Services,
+    flow: str,
+    *permissions: Permission,
 ) -> SquadDTO | None:
     """Если доступен один состав — возвращает его; иначе показывает выбор и возвращает None."""
-    squads = await available_squads(ctx, services, *roles)
+    squads = await available_squads(ctx, services, *permissions)
     if not squads:
         await message.answer(ru.NO_SQUADS_FOR_ACTION)
         return None
@@ -36,3 +45,12 @@ def callback_message(callback: CallbackQuery) -> Message | None:
     """Сообщение, к которому привязана кнопка (если оно ещё доступно)."""
     msg = callback.message
     return msg if msg is not None and not isinstance(msg, InaccessibleMessage) else None
+
+
+async def dismiss(message: Message) -> None:
+    """«Отмена» в вопросе: вопрос просто убирается, без сообщения «Отменено» — его легко
+    принять за отмену самого события. Старше 48 часов Telegram удалить не даст — снимаем кнопки."""
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        await message.edit_reply_markup(reply_markup=None)

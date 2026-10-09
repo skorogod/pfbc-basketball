@@ -32,6 +32,19 @@ class PollsRepository:
         )
         return (await self._session.scalars(stmt)).first()
 
+    async def list_to_close(self, now: datetime) -> list[Poll]:
+        """Действующие опросы, срок голосования которых прошёл."""
+        stmt = select(Poll).where(
+            Poll.closes_at <= now, Poll.closed_at.is_(None), Poll.superseded_at.is_(None)
+        )
+        return list(await self._session.scalars(stmt))
+
+    async def supersede(self, poll: Poll, at: datetime) -> None:
+        """Опрос больше не действующий: ответы в нём ни на что не влияют. Сразу в БД —
+        чтобы на тот же объект можно было добавить новый действующий опрос."""
+        poll.superseded_at = at
+        await self._session.flush()
+
     async def upsert_answer(
         self, poll_id: int, user_id: int, option_ids: list[int], answered_at: datetime
     ) -> None:

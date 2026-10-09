@@ -1,11 +1,13 @@
 import html
 from datetime import date, datetime
+from typing import Any
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator
 
 from pfbc_bot.domain.dates import parse_date
 from pfbc_bot.domain.enums import UserStatus
+from pfbc_bot.domain.payments import normalize_phone
 from pfbc_bot.schemas.base import DTO
 
 MTGAME_DOMAIN = "mtgame.ru"
@@ -28,6 +30,8 @@ class UserDTO(DTO):
     full_name: str | None
     birth_date: date | None
     mtgame_url: str | None
+    phone: str | None = None
+    payment_details: dict[str, Any] | None = None
     pd_consent_at: datetime | None
     is_admin: bool
     dm_available: bool
@@ -44,7 +48,15 @@ class UserDTO(DTO):
 
     @property
     def mention_html(self) -> str:
+        """Упоминание: в группе человек получает уведомление (дежурные, поздравления)."""
         return f'<a href="tg://user?id={self.tg_user_id}">{html.escape(self.display_name)}</a>'
+
+    @property
+    def profile_html(self) -> str:
+        """Ссылка на профиль для списков в личке: нажал — и можно написать человеку.
+        По username (t.me) открывается всегда; по id — если человек не запретил это
+        в настройках приватности Telegram."""
+        return profile_link(self.tg_user_id, self.username, self.display_name)
 
     @property
     def is_registered(self) -> bool:
@@ -90,6 +102,7 @@ class RegistrationData(BaseModel):
     full_name: str
     birth_date: date | None = None
     mtgame_url: str | None = None
+    phone: str | None = None
     pd_consent: bool = Field(description="Согласие на обработку персональных данных")
     guardian_consent: bool = False
 
@@ -118,9 +131,19 @@ class RegistrationData(BaseModel):
     def _mtgame(cls, value: str | None) -> str | None:
         return validate_mtgame_url(value) if value else None
 
+    @field_validator("phone")
+    @classmethod
+    def _phone(cls, value: str | None) -> str | None:
+        return normalize_phone(value) if value else None
+
     @field_validator("pd_consent")
     @classmethod
     def _consent(cls, value: bool) -> bool:
         if not value:
             raise ValueError("Без согласия на обработку персональных данных регистрация невозможна")
         return value
+
+
+def profile_link(tg_user_id: int, username: str | None, name: str) -> str:
+    href = f"https://t.me/{username}" if username else f"tg://user?id={tg_user_id}"
+    return f'<a href="{href}">{html.escape(name)}</a>'

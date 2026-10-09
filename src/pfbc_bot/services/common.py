@@ -1,6 +1,6 @@
 """Общие помощники сервисов: адресация сообщений состава, рассылка руководству."""
 
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 
 from pfbc_bot.db.models import Squad, User
 from pfbc_bot.domain.enums import STAFF_ROLES, SquadRole, TopicPurpose
@@ -43,6 +43,31 @@ async def send_to_squad(
     )
 
 
+AfterCommit = Callable[[], Awaitable[object]]
+
+
+async def deferred_to_squad(
+    uow: UnitOfWork, notifier: Notifier, squad_id: int, purpose: TopicPurpose, text: str
+) -> AfterCommit:
+    """Адрес — сейчас (в транзакции), отправка — после commit: сетевой вызов не держит
+    транзакцию и блокировки открытыми."""
+    destination = await resolve_destination(uow, squad_id, purpose)
+
+    async def send() -> object:
+        if destination is None:
+            return None
+        return await notifier.send_message(
+            destination.chat_id, text, thread_id=destination.thread_id
+        )
+
+    return send
+
+
+async def run_after_commit(actions: Iterable[AfterCommit]) -> None:
+    for action in actions:
+        await action()
+
+
 async def send_direct(
     notifier: Notifier, user: User, text: str, *, keyboard: Keyboard | None = None
 ) -> bool:
@@ -82,3 +107,13 @@ def squad_tz(squad: Squad | None, default: str = "Europe/Moscow") -> str:
 
 def to_dto(user: User) -> UserDTO:
     return UserDTO.model_validate(user)
+
+
+def profile(user: User | None) -> str:
+    """Имя-ссылка на профиль для сообщений в личку («?» — пользователя уже нет)."""
+    return to_dto(user).profile_html if user is not None else "?"
+
+
+def mention(user: User | None) -> str:
+    """Упоминание для сообщений в группе: человек получает уведомление."""
+    return to_dto(user).mention_html if user is not None else "?"

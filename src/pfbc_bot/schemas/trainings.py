@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 from pfbc_bot.domain.enums import DutyStatus, TrainingSource, TrainingStatus
 from pfbc_bot.schemas.base import DTO
+from pfbc_bot.schemas.events import EventDTO
 
 
 class ScheduleCreate(BaseModel):
@@ -55,5 +56,11 @@ class DutyAssignmentDTO(DTO):
 
 class AttendanceSummary(BaseModel):
     training: TrainingDTO
+    by_option: dict[str, list[str]]  # вариант ответа → имена
+    not_answered: list[str]
+
+
+class EventPollSummary(BaseModel):
+    event: EventDTO
     by_option: dict[str, list[str]]  # вариант ответа → имена
     not_answered: list[str]

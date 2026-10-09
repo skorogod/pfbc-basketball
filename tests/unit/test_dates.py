@@ -13,6 +13,7 @@ from pfbc_bot.domain.dates import (
     parse_date,
     parse_local_datetime,
     parse_schedule_line,
+    review_default_at,
     training_poll_at,
 )
 
@@ -209,3 +210,25 @@ def test_long_duty_lead_makes_training_early() -> None:
         duty_lead=timedelta(hours=10),
         early_until=time(14),
     ) == local_to_utc(date(2026, 10, 5), time(21), MSK)
+
+
+def test_review_default_at_first_training_of_week() -> None:
+    """За час до первой тренировки недели; прошедшая неделя — следующая неделя."""
+    mon, wed, next_mon = date(2026, 10, 5), date(2026, 10, 7), date(2026, 10, 12)
+    trainings = [local_to_utc(d, time(19, 0), MSK) for d in (mon, wed, next_mon)]
+    lead = timedelta(hours=1)
+
+    sunday = local_to_utc(date(2026, 10, 4), time(12, 0), MSK)
+    assert review_default_at(trainings, tz=MSK, now=sunday, lead=lead) == local_to_utc(
+        mon, time(18, 0), MSK
+    )
+    # в понедельник до 18:00 — ещё сегодня
+    assert review_default_at(
+        trainings, tz=MSK, now=local_to_utc(mon, time(17, 59), MSK), lead=lead
+    ) == local_to_utc(mon, time(18, 0), MSK)
+    # первая тренировка недели прошла — не среда, а первая тренировка следующей недели
+    tuesday = local_to_utc(date(2026, 10, 6), time(12, 0), MSK)
+    assert review_default_at(trainings, tz=MSK, now=tuesday, lead=lead) == local_to_utc(
+        next_mon, time(18, 0), MSK
+    )
+    assert review_default_at([], tz=MSK, now=tuesday, lead=lead) is None

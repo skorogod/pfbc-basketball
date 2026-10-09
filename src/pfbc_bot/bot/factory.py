@@ -2,17 +2,21 @@
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import SimpleEventIsolation
-from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats
+from aiogram.types import BotCommandScopeAllPrivateChats
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from pfbc_bot.bot.commands import BASE_COMMANDS, CANCEL
 from pfbc_bot.bot.fsm_storage import PostgresStorage
 from pfbc_bot.bot.middlewares.access import AccessMiddleware
+from pfbc_bot.bot.middlewares.commands import CommandMenuMiddleware, CommandResetMiddleware
 from pfbc_bot.bot.routers import (
     admin,
     duty,
     errors,
     events,
+    game_payments,
     membership,
+    permissions,
     polls,
     profile,
     registration,
@@ -21,20 +25,6 @@ from pfbc_bot.bot.routers import (
 from pfbc_bot.services.container import Services
 
 ALLOWED_UPDATES = ["message", "callback_query", "poll_answer", "chat_member", "my_chat_member"]
-
-PRIVATE_COMMANDS = [
-    BotCommand(command="start", description="Начать / регистрация"),
-    BotCommand(command="help", description="Список команд"),
-    BotCommand(command="profile", description="Мой профиль"),
-    BotCommand(command="events", description="Ближайшие события"),
-    BotCommand(command="schedule", description="Расписание тренировок"),
-    BotCommand(command="trainings", description="Ближайшие тренировки"),
-    BotCommand(command="attendance", description="Кто придёт на тренировку"),
-    BotCommand(command="duty", description="Дежурные: замена и ручной выбор"),
-    BotCommand(command="event_add", description="Добавить событие"),
-    BotCommand(command="invite", description="Ссылка на регистрацию для новичка"),
-    BotCommand(command="cancel", description="Отменить ввод"),
-]
 
 
 def create_dispatcher(
@@ -47,10 +37,12 @@ def create_dispatcher(
     )
     dp["services"] = services
 
-    access = AccessMiddleware()
+    access, menu = AccessMiddleware(), CommandMenuMiddleware()
     # poll_answer — без AccessMiddleware: участника состава опроса проверяет PollService
     for observer in (dp.message, dp.callback_query):
         observer.outer_middleware(access)
+        observer.outer_middleware(menu)
+    dp.message.outer_middleware(CommandResetMiddleware())
 
     dp.include_routers(
         errors.router,
@@ -58,13 +50,16 @@ def create_dispatcher(
         polls.router,
         duty.router,
         admin.router,
+        permissions.router,
         registration.router,
         profile.router,
         trainings.router,
         events.router,
+        game_payments.router,
     )
     return dp
 
 
 async def setup_bot_commands(bot: Bot) -> None:
-    await bot.set_my_commands(PRIVATE_COMMANDS, scope=BotCommandScopeAllPrivateChats())
+    """Общее меню — базовые команды; остальное каждый видит в своём меню (по правам)."""
+    await bot.set_my_commands([*BASE_COMMANDS, CANCEL], scope=BotCommandScopeAllPrivateChats())

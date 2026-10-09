@@ -1,4 +1,4 @@
-"""Процесс web: приём апдейтов Telegram (webhook в prod, polling в dev)."""
+"""Процесс bot: приём апдейтов Telegram (webhook в prod, polling в dev)."""
 
 import asyncio
 
@@ -17,11 +17,21 @@ async def healthz(_: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
-async def run_polling(runtime: Runtime) -> None:
+async def run_polling(runtime: Runtime, settings: Settings) -> None:
+    """Polling — для разработки. /healthz поднимается и здесь: healthcheck контейнера не
+    падает, если в .env оставлен BOT_MODE=polling (а в логе — предупреждение)."""
     dp = create_dispatcher(runtime.services, runtime.session_factory)
     await runtime.bot.delete_webhook(drop_pending_updates=False)
-    log.info("polling_started")
-    await dp.start_polling(runtime.bot, allowed_updates=ALLOWED_UPDATES)
+    app = web.Application()
+    app.router.add_get("/healthz", healthz)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, settings.web_host, settings.web_port).start()
+    log.warning("polling_started", hint="в prod нужен BOT_MODE=webhook: Caddy проксирует вебхук")
+    try:
+        await dp.start_polling(runtime.bot, allowed_updates=ALLOWED_UPDATES)
+    finally:
+        await runner.cleanup()
 
 
 async def run_webhook(runtime: Runtime, settings: Settings) -> None:
@@ -60,7 +70,7 @@ async def main() -> None:
         if settings.bot_mode == BotMode.WEBHOOK:
             await run_webhook(runtime, settings)
         else:
-            await run_polling(runtime)
+            await run_polling(runtime, settings)
     finally:
         await runtime.close()
 

@@ -1,4 +1,4 @@
-"""Расписание и тренировки (ФТ-2): /schedule, /trainings, /training_add, /attendance."""
+"""Расписание и тренировки (ФТ-2): /schedule, /trainings, /training_add, /poll, /attendance."""
 
 import html
 
@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from pfbc_bot.bot.helpers import ask_squad, callback_message
+from pfbc_bot.bot.helpers import ask_squad, callback_message, dismiss
 from pfbc_bot.bot.keyboards.common import ItemAction, SquadPick
 from pfbc_bot.bot.states import ScheduleEdit, TrainingEdit
 from pfbc_bot.domain.dates import (
@@ -21,30 +21,32 @@ from pfbc_bot.domain.dates import (
     to_local,
     utcnow,
 )
-from pfbc_bot.domain.enums import SquadRole
+from pfbc_bot.domain.enums import EVENT_TYPE_TITLES
+from pfbc_bot.domain.payments import format_amount
+from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.schemas.squads import SquadDTO, UserContext
 from pfbc_bot.schemas.trainings import ScheduleCreate, TrainingCreate
 from pfbc_bot.services.container import Services
+from pfbc_bot.services.events import format_short, format_when
 from pfbc_bot.texts import ru
 
 router = Router(name="trainings")
 router.message.filter(F.chat.type == ChatType.PRIVATE)
 
 SCHEDULE, TRAININGS, TRAINING_ADD, ATTENDANCE = "schedule", "trainings", "tr_add", "attendance"
-COACH = (SquadRole.COACH,)
-STAFF = (SquadRole.COACH, SquadRole.CAPTAIN)
+POLL = "poll"
 
 
 # --- вход в сценарии: команда или выбор состава ---
 @router.message(Command("schedule"))
 async def cmd_schedule(message: Message, ctx: UserContext, services: Services) -> None:
-    if squad := await ask_squad(message, ctx, services, SCHEDULE, *COACH):
+    if squad := await ask_squad(message, ctx, services, SCHEDULE, Permission.SCHEDULE):
         await show_schedule(message, squad, services)
 
 
 @router.message(Command("trainings"))
 async def cmd_trainings(message: Message, ctx: UserContext, services: Services) -> None:
-    if squad := await ask_squad(message, ctx, services, TRAININGS, *COACH):
+    if squad := await ask_squad(message, ctx, services, TRAININGS, Permission.SCHEDULE):
         await show_trainings(message, squad, services)
 
 
@@ -52,18 +54,24 @@ async def cmd_trainings(message: Message, ctx: UserContext, services: Services) 
 async def cmd_training_add(
     message: Message, ctx: UserContext, services: Services, state: FSMContext
 ) -> None:
-    if squad := await ask_squad(message, ctx, services, TRAINING_ADD, *COACH):
+    if squad := await ask_squad(message, ctx, services, TRAINING_ADD, Permission.SCHEDULE):
         await start_training_add(message, squad, state)
+
+
+@router.message(Command("poll"))
+async def cmd_poll(message: Message, ctx: UserContext, services: Services) -> None:
+    if squad := await ask_squad(message, ctx, services, POLL, Permission.TRAINING_POLL):
+        await show_poll_choice(message, squad, services)
 
 
 @router.message(Command("attendance"))
 async def cmd_attendance(message: Message, ctx: UserContext, services: Services) -> None:
-    if squad := await ask_squad(message, ctx, services, ATTENDANCE, *STAFF):
+    if squad := await ask_squad(message, ctx, services, ATTENDANCE, Permission.ATTENDANCE):
         await show_attendance_choice(message, squad, services)
 
 
 @router.callback_query(
-    SquadPick.filter(F.flow.in_({SCHEDULE, TRAININGS, TRAINING_ADD, ATTENDANCE}))
+    SquadPick.filter(F.flow.in_({SCHEDULE, TRAININGS, TRAINING_ADD, POLL, ATTENDANCE}))
 )
 async def on_squad_picked(
     callback: CallbackQuery, callback_data: SquadPick, services: Services, state: FSMContext
@@ -77,6 +85,7 @@ async def on_squad_picked(
         SCHEDULE: lambda: show_schedule(message, squad, services),
         TRAININGS: lambda: show_trainings(message, squad, services),
         TRAINING_ADD: lambda: start_training_add(message, squad, state),
+        POLL: lambda: show_poll_choice(message, squad, services),
         ATTENDANCE: lambda: show_attendance_choice(message, squad, services),
     }
     await handlers[callback_data.flow]()
@@ -150,7 +159,7 @@ def _confirm_markup(
 async def on_confirm_cancelled(callback: CallbackQuery) -> None:
     await callback.answer()
     if message := callback_message(callback):
-        await message.edit_text(ru.CANCELLED, reply_markup=None)
+        await dismiss(message)
 
 
 @router.message(ScheduleEdit.line, F.text)
@@ -288,20 +297,80 @@ async def on_training_add(
     )
 
 
-# --- посещаемость ---
-async def show_attendance_choice(message: Message, squad: SquadDTO, services: Services) -> None:
-    trainings = await services.trainings.recent_and_upcoming(squad.id)
+# --- опрос вручную: раньше планировщика или заново ---
+async def show_poll_choice(message: Message, squad: SquadDTO, services: Services) -> None:
+    trainings = await services.trainings.upcoming(squad.id)
     if not trainings:
         await message.answer(ru.TRAININGS_EMPTY)
         return
     builder = InlineKeyboardBuilder()
     for t in trainings:
         builder.button(
-            text=format_local(t.starts_at, squad.timezone),
-            callback_data=ItemAction(kind="tr", action="att", item_id=t.id),
+            text=f"{format_local(t.starts_at, squad.timezone)} · {t.venue}"[:60],
+            callback_data=ItemAction(kind="poll", action="start", item_id=t.id),
         )
     builder.adjust(1)
     await message.answer(ru.CHOOSE_TRAINING, reply_markup=builder.as_markup())
+
+
+@router.callback_query(ItemAction.filter(F.kind == "poll"))
+async def on_poll_action(
+    callback: CallbackQuery, callback_data: ItemAction, ctx: UserContext, services: Services
+) -> None:
+    await callback.answer()
+    message = callback_message(callback)
+    if message is None:
+        return
+    if callback_data.action == "start":  # шаг 1: вопрос — ничего не меняет
+        training = await services.trainings.get(callback_data.item_id)
+        squad = await services.squads.get(training.squad_id)
+        exists = await services.polls.has_training_poll(training.id)
+        text = ru.POLL_CONFIRM_RESTART if exists else ru.POLL_CONFIRM_START
+        await message.answer(
+            text.format(when=format_local(training.starts_at, squad.timezone)),
+            reply_markup=_confirm_markup(
+                "poll", "start_ok", callback_data.item_id, ru.POLL_BTN_CONFIRM
+            ),
+        )
+    elif callback_data.action == "start_ok":  # шаг 2: подтверждено
+        await services.polls.start_training_poll(ctx, callback_data.item_id)
+        await message.edit_text(ru.POLL_STARTED, reply_markup=None)
+
+
+# --- посещаемость: тренировки и события с опросом участия ---
+async def show_attendance_choice(message: Message, squad: SquadDTO, services: Services) -> None:
+    trainings = await services.trainings.recent_and_upcoming(squad.id)
+    events = await services.events.with_polls(squad.id)
+    if not trainings and not events:
+        await message.answer(ru.ATTENDANCE_NOTHING)
+        return
+    # два списка — тренировки отдельно от событий, чтобы не искать в общей куче
+    if trainings:
+        builder = InlineKeyboardBuilder()
+        for t in trainings:
+            builder.button(
+                text=f"🏀 {format_local(t.starts_at, squad.timezone)}",
+                callback_data=ItemAction(kind="tr", action="att", item_id=t.id),
+            )
+        builder.adjust(1)
+        await message.answer(ru.ATTENDANCE_TRAININGS, reply_markup=builder.as_markup())
+    if events:
+        builder = InlineKeyboardBuilder()
+        for e in events:
+            when = format_short(e, squad.timezone)
+            builder.button(
+                text=f"📅 {when} {EVENT_TYPE_TITLES[e.type]}: {e.title}"[:60],
+                callback_data=ItemAction(kind="ev", action="att", item_id=e.id),
+            )
+        builder.adjust(1)
+        await message.answer(ru.ATTENDANCE_EVENTS, reply_markup=builder.as_markup())
+
+
+def _option_lines(by_option: dict[str, list[str]]) -> str:
+    return "\n".join(
+        f"<b>{html.escape(option)}</b> ({len(names)}): {', '.join(names) or '—'}"
+        for option, names in by_option.items()
+    )
 
 
 @router.callback_query(ItemAction.filter((F.kind == "tr") & (F.action == "att")))
@@ -314,14 +383,60 @@ async def on_attendance(
         return
     summary = await services.polls.attendance(ctx, callback_data.item_id)
     squad = await services.squads.get(summary.training.squad_id)
-    lines = "\n".join(
-        f"<b>{html.escape(option)}</b> ({len(names)}): {', '.join(names) or '—'}"
-        for option, names in summary.by_option.items()
-    )
     await message.answer(
         ru.ATTENDANCE.format(
             when=format_local(summary.training.starts_at, squad.timezone),
-            lines=lines,
+            lines=_option_lines(summary.by_option),
             missing=", ".join(summary.not_answered) or "—",
         )
+    )
+
+
+async def _payment_status(ctx: UserContext, services: Services, event_id: int, tz: str) -> str:
+    """Если за игру собирают деньги — кто из игроков оплатил (только тренеру и админу)."""
+    event = await services.events.get(event_id)
+    if not ctx.can(event.squad_id, Permission.GAME_PAYMENTS):
+        return ""
+    status = await services.game_payments.status(ctx, event_id)
+    if status is None:
+        return ""
+    deadline = status.payment.deadline_at
+    others = (
+        ru.GAME_PAYMENT_STATUS_OTHERS.format(names=", ".join(status.others_paid))
+        if status.others_paid
+        else ""
+    )
+    return ru.GAME_PAYMENT_STATUS.format(
+        amount=format_amount(status.payment.amount),
+        deadline=f", до {format_local(deadline, tz)}" if deadline else "",
+        collector=f"\nПолучатель: {status.collector}" if status.collector else "",
+        paid_count=len(status.paid),
+        paid=", ".join(status.paid) or "—",
+        unpaid_count=len(status.unpaid),
+        unpaid=", ".join(status.unpaid) or "—",
+        others=others,
+    )
+
+
+@router.callback_query(ItemAction.filter((F.kind == "ev") & (F.action == "att")))
+async def on_event_attendance(
+    callback: CallbackQuery, callback_data: ItemAction, ctx: UserContext, services: Services
+) -> None:
+    await callback.answer()
+    message = callback_message(callback)
+    if message is None:
+        return
+    summary = await services.polls.event_attendance(ctx, callback_data.item_id)
+    event = summary.event
+    squad = await services.squads.get(event.squad_id)
+    tournament = f" · 🏆 {html.escape(event.tournament_title)}" if event.tournament_title else ""
+    await message.answer(
+        ru.EVENT_ATTENDANCE.format(
+            type=EVENT_TYPE_TITLES[event.type],
+            title=html.escape(event.title),
+            when=format_when(event, squad.timezone) + tournament,
+            lines=_option_lines(summary.by_option),
+            missing=", ".join(summary.not_answered) or "—",
+        )
+        + await _payment_status(ctx, services, event.id, squad.timezone)
     )

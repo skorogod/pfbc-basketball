@@ -36,6 +36,8 @@ class Poll(IdMixin, CreatedAtMixin, Base):
     closes_at: Mapped[datetime | None]
     # тренировку перенесли — опрос закрыт, ответы в нём больше ни на что не влияют
     superseded_at: Mapped[datetime | None]
+    # голосование закрыто по сроку (closes_at): ответы сохранены и учитываются в сводках
+    closed_at: Mapped[datetime | None]
 
 
 class PollAnswer(IdMixin, Base):

@@ -10,12 +10,13 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from pfbc_bot import callbacks
-from pfbc_bot.bot.helpers import ask_squad, callback_message
+from pfbc_bot.bot.helpers import ask_squad, callback_message, dismiss
 from pfbc_bot.bot.keyboards.common import SquadPick
+from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.integrations.telegram.notifier import to_markup
 from pfbc_bot.schemas.squads import SquadDTO, UserContext
 from pfbc_bot.services.container import Services
-from pfbc_bot.services.duty import DUTY_MANAGERS, Prompt
+from pfbc_bot.services.duty import Prompt
 from pfbc_bot.texts import ru
 
 router = Router(name="duty")
@@ -24,7 +25,7 @@ DUTY_FLOW = "duty"
 
 @router.message(Command("duty"), F.chat.type == ChatType.PRIVATE)
 async def cmd_duty(message: Message, ctx: UserContext, services: Services) -> None:
-    if squad := await ask_squad(message, ctx, services, DUTY_FLOW, *DUTY_MANAGERS):
+    if squad := await ask_squad(message, ctx, services, DUTY_FLOW, Permission.DUTY):
         await _show_duties(message, squad, ctx, services)
 
 
@@ -93,8 +94,11 @@ async def on_duty_callback(callback: CallbackQuery, ctx: UserContext, services: 
         result = await duty.decline(ctx, args[0])
     elif parsed.action == callbacks.DUTY_FIX_OK:
         result = await duty.fix(ctx, args[0], args[1])
-    else:
-        result = ru.CANCELLED
+    else:  # «Отмена» — вопрос убирается
+        await callback.answer()
+        if message is not None:
+            await dismiss(message)
+        return
     await callback.answer()
     if message is not None:
         await message.edit_text(result, reply_markup=None)

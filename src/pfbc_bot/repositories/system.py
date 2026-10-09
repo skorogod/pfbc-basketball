@@ -32,6 +32,11 @@ class SystemRepository:
         """Снимает отметку: событие изменилось (перенос) или отправка не удалась — повторить."""
         await self._session.execute(delete(ReminderLog).where(ReminderLog.key == key))
 
+    async def release_reminders(self, key_prefix: str) -> None:
+        """Снимает все отметки с префиксом (например, напоминания перенесённого события)."""
+        stmt = delete(ReminderLog).where(ReminderLog.key.startswith(key_prefix))
+        await self._session.execute(stmt)
+
     async def count_reminders(self, key_prefix: str) -> int:
         stmt = (
             select(func.count())

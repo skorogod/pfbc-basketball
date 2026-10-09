@@ -1,8 +1,10 @@
-"""Оплата тренировок по квитанциям mos.ru (этап 3)."""
+"""Оплата тренировок по квитанциям mos.ru (этап 3) и сбор денег за игры — это разные вещи."""
 
 from datetime import date, datetime, time
+from decimal import Decimal
+from typing import Any
 
-from sqlalchemy import ForeignKey, SmallInteger, String, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, Numeric, SmallInteger, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pfbc_bot.db.base import Base, CreatedAtMixin, IdMixin, str_enum
@@ -45,3 +47,34 @@ class PaymentReceipt(IdMixin, Base):
     confirmed_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
+
+
+class GamePayment(IdMixin, CreatedAtMixin, Base):
+    """Сбор денег за игру: сумма, реквизиты, дедлайн и опрос «Оплатил» в группе.
+    После дедлайна бот напоминает ответившим «Буду (игрок)», кто не отметил оплату."""
+
+    __tablename__ = "game_payments"
+    __table_args__ = (
+        # действующий сбор на матч — один
+        Index(
+            "uq_game_payments_active_event",
+            "event_id",
+            unique=True,
+            postgresql_where=text("cancelled_at IS NULL"),
+        ),
+    )
+
+    squad_id: Mapped[int] = mapped_column(ForeignKey("squads.id", ondelete="CASCADE"), index=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(10, 2))
+    deadline_at: Mapped[datetime | None]
+    details: Mapped[dict[str, Any]]  # снимок реквизитов на момент сбора
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    # кому переводят деньги (реквизиты — его); создать сбор может и админ за тренера
+    collector_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    # заменён новым сбором по той же игре или игра удалена — напоминаний нет
+    cancelled_at: Mapped[datetime | None]

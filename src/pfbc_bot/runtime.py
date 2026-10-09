@@ -1,4 +1,4 @@
-"""Общая инициализация процессов web и worker."""
+"""Общая инициализация процессов bot и worker."""
 
 from dataclasses import dataclass
 

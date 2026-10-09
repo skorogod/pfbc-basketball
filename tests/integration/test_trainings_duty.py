@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, date, datetime, time, timedelta
+from typing import Any
 
 import pytest
 
@@ -13,6 +14,7 @@ from pfbc_bot.repositories.uow import UowFactory
 from pfbc_bot.schemas.trainings import ScheduleCreate, TrainingCreate
 from pfbc_bot.services.container import Services
 from pfbc_bot.services.errors import Conflict, PermissionDenied
+from pfbc_bot.services.ports import SentPoll
 from pfbc_bot.texts import ru
 
 from .conftest import ADMIN_TG_ID, FakeNotifier
@@ -171,7 +173,7 @@ async def test_duty_feature_flag_disables_assignment(
     services: Services, notifier: FakeNotifier, team: dict[str, int]
 ) -> None:
     await services.settings.set_squad_value(
-        team["squad_id"], "features.duty", "false", actor_user_id=None
+        await ctx_of(services, ADMIN_TG_ID), team["squad_id"], "features.duty", "false"
     )
     await services.polls.publish_training_polls(now=at(9))
     assert await services.duty.assign_due(now=at(16)) == 0
@@ -229,7 +231,7 @@ async def test_duty_declines_himself_with_confirmation(
     assert any("не может дежурить" in m.text for m in notifier.to(CAPTAIN))
     # ответ в опросе не тронут — в сводке посещаемости игрок по-прежнему «Да»
     summary = await services.polls.attendance(await ctx_of(services, COACH), training_id)
-    assert "user3" in summary.by_option["Да"]
+    assert '<a href="tg://user?id=3">user3</a>' in summary.by_option["Да"]
     # повторное нажатие ничего не ломает
     with pytest.raises(Conflict):
         await services.duty.decline(me, assignment_3, now=at(16, 12))
@@ -246,13 +248,16 @@ async def test_not_notified_duty_marked_for_captain(
     await services.duty.assign_due(now=at(16))
     summary = notifier.to(CAPTAIN)[-1].text
     lines = {line for line in summary.splitlines() if line.startswith("•")}
-    assert f"• user3{ru.DUTY_NOT_NOTIFIED_MARK}" in lines
-    assert "• user2" in lines  # личное сообщение дошло — пометки нет
+    assert f'• <a href="tg://user?id=3">user3</a>{ru.DUTY_NOT_NOTIFIED_MARK}' in lines
+    assert '• <a href="tg://user?id=2">user2</a>' in lines  # личное дошло — пометки нет
 
     # замена тоже не дошла до нового дежурного — капитан предупреждён
     notifier.blocked_dm.add(1)
     await services.polls.record_answer("poll-1", 2, [NO], now=at(16, 30))
-    assert "user1 не получил(а) уведомление" in notifier.to(CAPTAIN)[-1].text
+    assert (
+        '<a href="tg://user?id=1">user1</a> не получил(а) уведомление'
+        in notifier.to(CAPTAIN)[-1].text
+    )
 
 
 async def test_manager_prompts_list_assigned_duties(
@@ -509,3 +514,99 @@ async def test_member_who_left_is_replaced_on_duty(
     assert await _active_duty(uow_factory, training_id) == {team["u2"], team["u1"]}
     assert any("вышел(а) из группы" in m.text for m in notifier.to(CAPTAIN))
     assert any("Замена дежурного" in m.text for m in notifier.to(CHAT_ID))
+
+
+async def test_manual_poll_before_scheduler(
+    services: Services, notifier: FakeNotifier, uow_factory: UowFactory, team: dict[str, int]
+) -> None:
+    """Капитан запустил опрос раньше времени — планировщик свой уже не публикует."""
+    training_id = (await services.trainings.upcoming(team["squad_id"], now=at(8)))[0].id
+    await services.polls.start_training_poll(
+        await ctx_of(services, CAPTAIN), training_id, now=at(8)
+    )
+    assert notifier.polls == [(CHAT_ID, notifier.polls[0][1], TRAININGS_THREAD)]
+    assert "05.10.2026 19:00" in notifier.polls[0][1]
+
+    assert await services.polls.publish_training_polls(now=at(9)) == 0
+    assert len(notifier.polls) == 1
+
+    # ответы в ручном опросе — обычные: по ним назначаются дежурные
+    for tg_id in (1, 2, 3):
+        await services.polls.record_answer("poll-1", tg_id, [YES], now=at(10))
+    assert await services.duty.assign_due(now=at(16)) == 1
+    assert await _active_duty(uow_factory, training_id) == {team["u3"], team["u2"]}
+
+
+async def test_manual_poll_restart_closes_bot_poll(
+    services: Services, notifier: FakeNotifier, uow_factory: UowFactory, team: dict[str, int]
+) -> None:
+    """Опрос заново поверх опубликованного ботом: старый закрыт, его ответы не учитываются."""
+    training_id = (await services.trainings.upcoming(team["squad_id"], now=at(9)))[0].id
+    assert await services.polls.publish_training_polls(now=at(9)) == 1
+    for tg_id in (1, 2, 3):
+        await services.polls.record_answer("poll-1", tg_id, [YES], now=at(9, 30))
+
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    await services.polls.start_training_poll(admin, training_id, now=at(10))
+    assert notifier.stopped_polls == [(CHAT_ID, 1001)]
+    assert len(notifier.polls) == 2
+    assert await services.polls.publish_training_polls(now=at(11)) == 0
+
+    await services.polls.record_answer("poll-1", 4, [YES], now=at(10, 5))  # в закрытом опросе
+    await services.polls.record_answer("poll-2", 1, [YES], now=at(10, 10))
+    assert await services.duty.assign_due(now=at(16)) == 1
+    assert await _active_duty(uow_factory, training_id) == {team["u1"]}
+
+    summary = await services.polls.attendance(admin, training_id)
+    assert len(summary.by_option["Да"]) == 1
+
+
+async def test_manual_poll_refused(
+    services: Services, notifier: FakeNotifier, team: dict[str, int]
+) -> None:
+    training_id = (await services.trainings.upcoming(team["squad_id"], now=at(9)))[0].id
+    with pytest.raises(PermissionDenied):
+        await services.polls.start_training_poll(await ctx_of(services, 1), training_id, now=at(9))
+    coach = await ctx_of(services, COACH)
+    with pytest.raises(Conflict):
+        await services.polls.start_training_poll(coach, training_id, now=at(19, 1))
+    assert notifier.polls == []
+
+
+async def test_manual_poll_while_scheduler_sends(
+    services: Services, notifier: FakeNotifier, team: dict[str, int]
+) -> None:
+    """Пока планировщик отправлял опрос, тренер запустил свой — действует ручной."""
+    training_id = (await services.trainings.upcoming(team["squad_id"], now=at(9)))[0].id
+    coach = await ctx_of(services, COACH)
+    send_poll = notifier.send_poll
+
+    async def send_and_race(*args: Any, **kwargs: Any) -> SentPoll | None:
+        sent = await send_poll(*args, **kwargs)
+        if len(notifier.polls) == 1:
+            await services.polls.start_training_poll(coach, training_id, now=at(9))
+        return sent
+
+    notifier.send_poll = send_and_race  # type: ignore[method-assign]
+    assert await services.polls.publish_training_polls(now=at(9)) == 0
+    assert notifier.stopped_polls == [(CHAT_ID, 1001)]  # опрос планировщика закрыт
+    summary = await services.polls.attendance(coach, training_id)
+    assert summary.not_answered  # действующий опрос — ручной (poll-2)
+    await services.polls.record_answer("poll-2", 1, [YES], now=at(9, 5))
+    summary = await services.polls.attendance(coach, training_id)
+    assert len(summary.by_option["Да"]) == 1
+
+
+async def test_duty_messages_link_people(
+    services: Services, notifier: FakeNotifier, uow_factory: UowFactory, team: dict[str, int]
+) -> None:
+    """Имена в сообщениях — ссылки: в личке — на профиль, в группе — упоминание."""
+    _, assignment_3 = await _assign_today(services, uow_factory, team)
+    captain = await ctx_of(services, CAPTAIN)
+    prompt = await services.duty.confirm_replace(captain, assignment_3, now=at(16, 10))
+    assert '<a href="tg://user?id=3">user3</a>' in prompt.text  # кого заменить
+    assert '<a href="tg://user?id=1">user1</a>' in prompt.text  # следующий по очереди
+    await services.duty.replace(captain, assignment_3, now=at(16, 11))
+    group = [m.text for m in notifier.to(CHAT_ID) if "Замена дежурного" in m.text][-1]
+    assert '<a href="tg://user?id=3">user3</a> → <a href="tg://user?id=1">user1</a>' in group
+    assert '<a href="tg://user?id=1">user1</a>' in notifier.to(3)[-1].text  # кто заменил

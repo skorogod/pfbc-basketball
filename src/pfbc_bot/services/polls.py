@@ -1,9 +1,8 @@
-"""Опросы: утренний опрос на тренировку (ФТ-2), приём ответов, сводка посещаемости."""
+"""Опросы: утренний опрос на тренировку (ФТ-2), ручной запуск, приём ответов, сводка."""
 
-import html
 from datetime import datetime, timedelta
 
-from pfbc_bot.db.models import Poll
+from pfbc_bot.db.models import Poll, Training
 from pfbc_bot.domain.dates import format_local, training_poll_at, utcnow
 from pfbc_bot.domain.enums import (
     ACTIVE_TRAINING_STATUSES,
@@ -11,19 +10,21 @@ from pfbc_bot.domain.enums import (
     TRAINING_POLL_YES,
     MembershipStatus,
     PollType,
-    SquadRole,
     TopicPurpose,
 )
+from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.logging import get_logger
 from pfbc_bot.repositories.uow import UnitOfWork, UowFactory
-from pfbc_bot.schemas.squads import UserContext
-from pfbc_bot.schemas.trainings import AttendanceSummary, TrainingDTO
+from pfbc_bot.schemas.squads import Destination, UserContext
+from pfbc_bot.schemas.trainings import AttendanceSummary, EventPollSummary, TrainingDTO
 from pfbc_bot.schemas.users import TelegramUser
 from pfbc_bot.services.common import resolve_destination, squad_tz, to_dto
 from pfbc_bot.services.duty import DutyService
-from pfbc_bot.services.errors import NotFound, PermissionDenied
+from pfbc_bot.services.errors import Conflict, NotFound
+from pfbc_bot.services.events import EVENT_POLLS, EVENT_REF, to_dtos
 from pfbc_bot.services.membership import MembershipService
-from pfbc_bot.services.ports import Notifier
+from pfbc_bot.services.permissions import require
+from pfbc_bot.services.ports import Notifier, SentPoll
 from pfbc_bot.services.settings import load_squad_settings
 from pfbc_bot.texts import ru
 
@@ -34,6 +35,23 @@ TRAINING_REF = "training"
 def poll_key(training_id: int) -> str:
     """Ключ reminder_log опроса тренировки (снимается при переносе — опрос публикуется заново)."""
     return f"poll:{training_id}"
+
+
+def _training_poll(
+    training: Training, destination: Destination, question: str, sent: SentPoll
+) -> Poll:
+    return Poll(
+        type=PollType.TRAINING,
+        squad_id=training.squad_id,
+        ref_type=TRAINING_REF,
+        ref_id=training.id,
+        tg_poll_id=sent.poll_id,
+        chat_id=destination.chat_id,
+        message_id=sent.message_id,
+        question=question[:300],
+        options=list(TRAINING_POLL_OPTIONS),
+        closes_at=training.starts_at,
+    )
 
 
 class PollService:
@@ -94,33 +112,108 @@ class PollService:
                 question = ru.TRAINING_POLL_QUESTION.format(
                     when=format_local(training.starts_at, tz), venue=training.venue
                 )
-                sent = await self._notifier.send_poll(
-                    destination.chat_id,
-                    question,
-                    TRAINING_POLL_OPTIONS,
-                    thread_id=destination.thread_id,
-                )
+                sent = await self._send_poll(destination, question)
                 if sent is None:
                     await uow.system.release_reminder(key)  # повторим на следующем тике
                     await uow.commit()
                     continue
-                await uow.polls.add(
-                    Poll(
-                        type=PollType.TRAINING,
-                        squad_id=training.squad_id,
-                        ref_type=TRAINING_REF,
-                        ref_id=training.id,
-                        tg_poll_id=sent.poll_id,
-                        chat_id=destination.chat_id,
-                        message_id=sent.message_id,
-                        question=question[:300],
-                        options=list(TRAINING_POLL_OPTIONS),
-                        closes_at=training.starts_at,
-                    )
-                )
+                # по очереди с ручным запуском: если, пока отправляли, опрос уже запустили
+                # вручную, — действует он, а наш закрывается
+                await uow.trainings.get(training_id, for_update=True)
+                if await uow.polls.get_for_ref(PollType.TRAINING, TRAINING_REF, training_id):
+                    await self._notifier.stop_poll(destination.chat_id, sent.message_id)
+                    continue
+                await uow.polls.add(_training_poll(training, destination, question, sent))
                 await uow.commit()
                 published += 1
         return published
+
+    async def start_training_poll(
+        self, actor: UserContext, training_id: int, *, now: datetime | None = None
+    ) -> None:
+        """Опрос на тренировку по команде — раньше планировщика или заново. Действующий опрос
+        закрывается (ответы в нём больше ни на что не влияют), отметка poll:<id> занимается —
+        планировщик на эту тренировку опрос уже не публикует.
+
+        В две фазы, чтобы отправка в Telegram не держала блокировку тренировки: проверки и
+        отметка → отправка → под блокировкой запись нового опроса и закрытие действующего
+        (действующим мог стать и опрос планировщика, отправленный параллельно)."""
+        now = now or utcnow()
+        async with self._uow_factory() as uow:
+            training = await uow.trainings.get(training_id, for_update=True)
+            if training is None or training.status not in ACTIVE_TRAINING_STATUSES:
+                raise NotFound("Тренировка не найдена или уже отменена")
+            require(actor, training.squad_id, Permission.TRAINING_POLL)
+            if training.starts_at <= now:
+                raise Conflict(ru.POLL_TRAINING_STARTED)
+            destination = await resolve_destination(uow, training.squad_id, TopicPurpose.TRAININGS)
+            if destination is None:
+                raise Conflict(ru.POLL_NO_CHAT)
+            had_poll = (
+                await uow.polls.get_for_ref(PollType.TRAINING, TRAINING_REF, training.id)
+                is not None
+            )
+            claimed = await uow.system.claim_reminder(poll_key(training.id), "training_poll")
+            tz = squad_tz(await uow.squads.get(training.squad_id))
+            question = ru.TRAINING_POLL_QUESTION.format(
+                when=format_local(training.starts_at, tz), venue=training.venue
+            )
+            await uow.commit()
+
+        sent = await self._send_poll(destination, question)
+        if sent is None:  # прежний опрос остаётся действующим; отметку — вернуть планировщику
+            if claimed and not had_poll:
+                async with self._uow_factory() as uow:
+                    await uow.system.release_reminder(poll_key(training_id))
+                    await uow.commit()
+            raise Conflict(ru.POLL_NOT_SENT)
+
+        async with self._uow_factory() as uow:
+            training = await uow.trainings.get(training_id, for_update=True)
+            if training is None or training.status not in ACTIVE_TRAINING_STATUSES:
+                # тренировку отменили, пока отправляли, — наш опрос не нужен
+                await uow.rollback()
+                await self._notifier.stop_poll(destination.chat_id, sent.message_id)
+                raise NotFound("Тренировка не найдена или уже отменена")
+            previous = await uow.polls.get_for_ref(PollType.TRAINING, TRAINING_REF, training.id)
+            if previous is not None:
+                await uow.polls.supersede(previous, now)
+            await uow.polls.add(_training_poll(training, destination, question, sent))
+            await uow.system.audit(
+                actor_user_id=actor.user.id,
+                action="poll.start" if previous is None else "poll.restart",
+                entity="training",
+                entity_id=training.id,
+            )
+            await uow.commit()
+        if previous is not None:
+            await self._notifier.stop_poll(previous.chat_id, previous.message_id)
+
+    async def close_due(self, *, now: datetime | None = None) -> int:
+        """Закрывает голосование, когда тренировка или событие началось: отвечать «приду»
+        после начала незачем. Ответы сохраняются и видны в сводках."""
+        now = now or utcnow()
+        async with self._uow_factory() as uow:
+            polls = await uow.polls.list_to_close(now)
+            for poll in polls:
+                poll.closed_at = now
+            await uow.commit()
+        for poll in polls:
+            await self._notifier.stop_poll(poll.chat_id, poll.message_id)
+        return len(polls)
+
+    async def has_training_poll(self, training_id: int) -> bool:
+        async with self._uow_factory() as uow:
+            poll = await uow.polls.get_for_ref(PollType.TRAINING, TRAINING_REF, training_id)
+            return poll is not None
+
+    async def _send_poll(self, destination: Destination, question: str) -> SentPoll | None:
+        return await self._notifier.send_poll(
+            destination.chat_id,
+            question,
+            TRAINING_POLL_OPTIONS,
+            thread_id=destination.thread_id,
+        )
 
     async def record_answer(
         self,
@@ -176,27 +269,51 @@ class PollService:
             training = await uow.trainings.get(training_id)
             if training is None:
                 raise NotFound("Тренировка не найдена")
-            if not actor.has_role(training.squad_id, SquadRole.COACH, SquadRole.CAPTAIN):
-                raise PermissionDenied(ru.NO_PERMISSION)
+            require(actor, training.squad_id, Permission.ATTENDANCE)
             poll = await uow.polls.get_for_ref(PollType.TRAINING, TRAINING_REF, training.id)
             if poll is None:
                 raise NotFound(ru.ATTENDANCE_NO_POLL)
-            answers = await uow.polls.answers(poll.id)
-            members = await uow.members.list_active_for_squad(training.squad_id)
-            options = [str(o) for o in poll.options]
-            by_option: dict[str, list[str]] = {o: [] for o in options}
-            not_answered: list[str] = []
-            for _, user in members:
-                name = html.escape(to_dto(user).display_name)
-                chosen = answers.get(user.id)
-                if not chosen:
-                    not_answered.append(name)
-                    continue
-                for idx in chosen:
-                    if 0 <= idx < len(options):
-                        by_option[options[idx]].append(name)
+            by_option, not_answered = await _tally(uow, poll)
             return AttendanceSummary(
                 training=TrainingDTO.model_validate(training),
                 by_option=by_option,
                 not_answered=not_answered,
             )
+
+    async def event_attendance(self, actor: UserContext, event_id: int) -> EventPollSummary:
+        """Сводка опроса участия в матче, турнире или разборе игры."""
+        async with self._uow_factory() as uow:
+            event = await uow.events.get(event_id)
+            if event is None:
+                raise NotFound("Событие не найдено")
+            require(actor, event.squad_id, Permission.ATTENDANCE)
+            spec = EVENT_POLLS.get(event.type)
+            poll = spec and await uow.polls.get_for_ref(spec.poll_type, EVENT_REF, event.id)
+            if not poll:
+                raise NotFound(ru.EVENT_NO_POLL)
+            by_option, not_answered = await _tally(uow, poll)
+            [dto] = await to_dtos(uow, [event])
+            return EventPollSummary(
+                event=dto,
+                by_option=by_option,
+                not_answered=not_answered,
+            )
+
+
+async def _tally(uow: UnitOfWork, poll: Poll) -> tuple[dict[str, list[str]], list[str]]:
+    """Активные участники состава по вариантам ответа и не ответившие."""
+    answers = await uow.polls.answers(poll.id)
+    members = await uow.members.list_active_for_squad(poll.squad_id)
+    options = [str(o) for o in poll.options]
+    by_option: dict[str, list[str]] = {o: [] for o in options}
+    not_answered: list[str] = []
+    for _, user in members:
+        name = to_dto(user).profile_html
+        chosen = answers.get(user.id)
+        if not chosen:
+            not_answered.append(name)
+            continue
+        for idx in chosen:
+            if 0 <= idx < len(options):
+                by_option[options[idx]].append(name)
+    return by_option, not_answered

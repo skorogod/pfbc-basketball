@@ -33,21 +33,23 @@ from pfbc_bot.domain.enums import (
     DutyStatus,
     MembershipStatus,
     PollType,
-    SquadRole,
     TopicPurpose,
 )
+from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.logging import get_logger
 from pfbc_bot.repositories.uow import UnitOfWork, UowFactory
 from pfbc_bot.schemas.settings import SquadSettings
 from pfbc_bot.schemas.squads import UserContext
 from pfbc_bot.services.common import (
-    notify_staff,
+    mention,
+    profile,
     resolve_destination,
     send_direct,
     squad_tz,
     to_dto,
 )
 from pfbc_bot.services.errors import Conflict, NotFound, PermissionDenied
+from pfbc_bot.services.permissions import Recipients, require
 from pfbc_bot.services.ports import InlineButton, Keyboard, Notifier
 from pfbc_bot.services.settings import load_squad_settings
 from pfbc_bot.texts import ru
@@ -55,7 +57,6 @@ from pfbc_bot.texts import ru
 log = get_logger(__name__)
 
 TRAINING_REF = "training"
-DUTY_MANAGERS = (SquadRole.CAPTAIN, SquadRole.COACH)
 MAX_PICK_BUTTONS = 40
 MANAGE_HORIZON = timedelta(days=7)
 FIX_HORIZON = timedelta(days=7)  # сколько после тренировки можно исправить запись о дежурстве
@@ -80,7 +81,7 @@ def _button(text: str, action: str, *args: int) -> InlineButton:
 
 def _picked(user: User, notified: bool) -> str:
     """Ответ капитану после назначения; предупреждение, если дежурный ничего не получил."""
-    name = html.escape(to_dto(user).display_name)
+    name = profile(user)
     text = ru.DUTY_PICKED.format(name=name)
     return text if notified else text + ru.DUTY_NOT_NOTIFIED_CAPTAIN.format(name=name)
 
@@ -91,10 +92,16 @@ def _confirm_keyboard(confirm_text: str, action: str, *args: int) -> Keyboard:
 
 class DutyService:
     def __init__(
-        self, uow_factory: UowFactory, notifier: Notifier, *, rng: random.Random | None = None
+        self,
+        uow_factory: UowFactory,
+        notifier: Notifier,
+        recipients: Recipients,
+        *,
+        rng: random.Random | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._notifier = notifier
+        self._recipients = recipients
         self._rng = rng or random.Random()
 
     # --- плановое назначение ---
@@ -271,13 +278,13 @@ class DutyService:
             next_user = await self._next_in_queue(uow, training, assignment, now)
             when = await self._when(uow, training)
         next_line = (
-            ru.DUTY_CONFIRM_NEXT.format(name=html.escape(to_dto(next_user).display_name))
+            ru.DUTY_CONFIRM_NEXT.format(name=profile(next_user))
             if next_user
             else ru.DUTY_CONFIRM_NO_NEXT
         )
         return Prompt(
             ru.DUTY_CONFIRM_REPLACE.format(
-                old=html.escape(to_dto(old_user).display_name) if old_user else "?",
+                old=profile(old_user),
                 when=when,
                 next=next_line,
             ),
@@ -328,7 +335,7 @@ class DutyService:
             user = await self._pickable_user(uow, training, user_id)
             when = await self._when(uow, training)
         return Prompt(
-            ru.DUTY_CONFIRM_PICK.format(name=html.escape(to_dto(user).display_name), when=when),
+            ru.DUTY_CONFIRM_PICK.format(name=profile(user), when=when),
             _confirm_keyboard(
                 ru.DUTY_BTN_CONFIRM_PICK, callbacks.DUTY_PICK_OK, training_id, user_id
             ),
@@ -384,7 +391,7 @@ class DutyService:
             return Prompt(
                 ru.DUTY_FIX_PICK_PROMPT.format(
                     when=await self._when(uow, training),
-                    old=html.escape(to_dto(old_user).display_name) if old_user else "?",
+                    old=profile(old_user),
                 ),
                 keyboard,
             )
@@ -402,8 +409,8 @@ class DutyService:
         return Prompt(
             ru.DUTY_CONFIRM_FIX.format(
                 when=when,
-                new=html.escape(to_dto(new_user).display_name),
-                old=html.escape(to_dto(old_user).display_name) if old_user else "?",
+                new=profile(new_user),
+                old=profile(old_user),
             ),
             _confirm_keyboard(
                 ru.DUTY_BTN_CONFIRM_FIX, callbacks.DUTY_FIX_OK, assignment_id, user_id
@@ -441,7 +448,7 @@ class DutyService:
             )
             await uow.commit()
             log.info("duty_fixed", training_id=training.id, old=old_user_id, new=user_id)
-        return ru.DUTY_FIXED.format(name=html.escape(to_dto(new_user).display_name))
+        return ru.DUTY_FIXED.format(name=profile(new_user))
 
     async def _fixable_assignment(
         self,
@@ -471,8 +478,7 @@ class DutyService:
     # --- проверки ---
     @staticmethod
     def _require_manager(actor: UserContext, squad_id: int) -> None:
-        if not actor.has_role(squad_id, *DUTY_MANAGERS):
-            raise PermissionDenied(ru.NO_PERMISSION)
+        require(actor, squad_id, Permission.DUTY)
 
     @staticmethod
     async def _get_upcoming(
@@ -590,7 +596,7 @@ class DutyService:
         assignment.replaced_at = now
         settings = await load_squad_settings(uow, training.squad_id)
         old_user = await uow.users.get(assignment.user_id)
-        old_name = html.escape(to_dto(old_user).display_name) if old_user else "?"
+        old_name = mention(old_user)  # сообщения в группу — снятый дежурный тоже узнает
         when = await self._when(uow, training)
         new_assignment = None
         if new_user is not None:
@@ -622,12 +628,12 @@ class DutyService:
             )
         # снятого капитаном/тренером предупреждаем; кто отказался сам — и так знает
         if by_user_id is not None and old_user is not None and by_user_id != old_user.id:
-            replacement = to_dto(new_user).display_name if new_user else "—"
+            replacement = profile(new_user) if new_user else "—"
             await send_direct(
                 self._notifier,
                 old_user,
                 ru.DUTY_UNASSIGNED_DM.format(
-                    when=await self._when(uow, training), name=html.escape(replacement)
+                    when=await self._when(uow, training), name=replacement
                 ),
             )
         return new_user, notified
@@ -644,16 +650,16 @@ class DutyService:
         old_user = await uow.users.get(assignment.user_id)
         new_user, notified = await self._replace(uow, training, assignment, now, by_user_id=None)
         if new_user is not None:
-            new_name = html.escape(to_dto(new_user).display_name)
+            new_name = profile(new_user)
             text = template.format(
-                old=html.escape(to_dto(old_user).display_name) if old_user else "?",
+                old=profile(old_user),
                 when=await self._when(uow, training),
                 new=new_name,
             )
             if not notified:
                 text += ru.DUTY_NOT_NOTIFIED_CAPTAIN.format(name=new_name)
-            await notify_staff(
-                uow, self._notifier, training.squad_id, text, roles=[SquadRole.CAPTAIN]
+            await self._recipients.notify(
+                uow, self._notifier, training.squad_id, Permission.DUTY, text
             )
             return
         settings = await load_squad_settings(uow, training.squad_id)
@@ -780,11 +786,7 @@ class DutyService:
         if user is None:
             return False
         when = await self._when(uow, training)
-        instead_text = (
-            ru.DUTY_INSTEAD.format(name=html.escape(to_dto(instead).display_name))
-            if instead
-            else ""
-        )
+        instead_text = ru.DUTY_INSTEAD.format(name=profile(instead)) if instead else ""
         return await send_direct(
             self._notifier,
             user,
@@ -804,7 +806,7 @@ class DutyService:
         users = {u.id: u for u in await uow.users.list_by_ids([a.user_id for a in active])}
         squad = await uow.squads.get(training.squad_id)
         names = "\n".join(
-            f"• {html.escape(to_dto(users[a.user_id]).display_name)}"
+            f"• {to_dto(users[a.user_id]).profile_html}"
             + (ru.DUTY_NOT_NOTIFIED_MARK if a.user_id in not_notified else "")
             for a in active
         )
@@ -832,9 +834,7 @@ class DutyService:
         counted = await self._counted(uow, training)
         users = {u.id: u for u in await uow.users.list_by_ids([a.user_id for a in counted])}
         squad = await uow.squads.get(training.squad_id)
-        names = "\n".join(
-            f"• {html.escape(to_dto(users[a.user_id]).display_name)}" for a in counted
-        )
+        names = "\n".join(f"• {to_dto(users[a.user_id]).profile_html}" for a in counted)
         keyboard = [
             [
                 _button(
@@ -857,23 +857,22 @@ class DutyService:
     async def _send_staff_summary(
         self, uow: UnitOfWork, training: Training, not_notified: Collection[int] = ()
     ) -> None:
-        """Капитану (нет капитана — тренеру) в личку: кто дежурит и кнопки управления."""
+        """Тем, кто управляет дежурствами (по умолчанию — капитану), в личку: кто дежурит и
+        кнопки управления."""
         prompt = await self._staff_prompt(uow, training, not_notified)
-        for roles in ([SquadRole.CAPTAIN], [SquadRole.COACH]):
-            if await notify_staff(
-                uow,
-                self._notifier,
-                training.squad_id,
-                prompt.text,
-                roles=roles,
-                keyboard=prompt.keyboard,
-            ):
-                return
+        await self._recipients.notify(
+            uow,
+            self._notifier,
+            training.squad_id,
+            Permission.DUTY,
+            prompt.text,
+            keyboard=prompt.keyboard,
+        )
 
     async def _notify_shortage(
         self, uow: UnitOfWork, training: Training, assigned: int, need: int
     ) -> None:
-        """Не хватает дежурных: список для ручного выбора капитану (если капитана нет — тренеру)."""
+        """Не хватает дежурных: список для ручного выбора тем, кто управляет дежурствами."""
         squad = await uow.squads.get(training.squad_id)
         text = ru.DUTY_SHORTAGE_CAPTAIN.format(
             when=await self._when(uow, training),
@@ -882,11 +881,9 @@ class DutyService:
             need=need,
         )
         keyboard = await self._pick_keyboard(uow, training)
-        for roles in ([SquadRole.CAPTAIN], [SquadRole.COACH]):
-            if await notify_staff(
-                uow, self._notifier, training.squad_id, text, roles=roles, keyboard=keyboard
-            ):
-                return
+        await self._recipients.notify(
+            uow, self._notifier, training.squad_id, Permission.DUTY, text, keyboard=keyboard
+        )
 
     async def _pick_keyboard(self, uow: UnitOfWork, training: Training) -> Keyboard:
         assigned = {a.user_id for a in await self._active(uow, training)}

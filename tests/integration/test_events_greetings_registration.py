@@ -42,12 +42,13 @@ async def test_event_reminders_3_1_0_days_exactly_once(
             now=at(date(2026, 10, 1), 12),
         )
     await services.events.create(
-        await ctx_of(services, CAPTAIN),
+        await ctx_of(services, COACH),
         EventCreate(
             squad_id=squad.id,
             type=EventType.TOURNAMENT,
             title="Турнир памяти",
             starts_at=at(event_day, 18),
+            duration_days=2,
             place="ФОК",
             notify_group=True,
         ),
@@ -61,12 +62,14 @@ async def test_event_reminders_3_1_0_days_exactly_once(
             if await services.events.send_due_reminders(now=at(day, 9, minute)):
                 sent_days.append(day_offset)
     assert sent_days == [3, 1, 0]
-    assert len(notifier.to(COACH)) == 3 and len(notifier.to(CAPTAIN)) == 3
+    # напоминания о турнире — тем, кто ведёт игры и турниры (тренер); капитану — нет
+    assert len(notifier.to(COACH)) == 3 and len(notifier.to(CAPTAIN)) == 0
     assert len(notifier.to(1)) == 0  # игрокам — только через группу
     # в группе: пост о турнире при создании + 3 напоминания, всё в топике «Игры»
     group = notifier.to(CHAT_ID)
     assert len(group) == 4 and all(m.thread_id == GAMES_THREAD for m in group)
-    assert "Турнир памяти" in group[0].text and "18:00–19:30" in group[0].text
+    period = f"{event_day:%d.%m.%Y} – {event_day + timedelta(days=1):%d.%m.%Y} (2 дн.)"
+    assert "Турнир памяти" in group[0].text and period in group[0].text
     assert "завтра" in notifier.to(COACH)[1].text
 
     events = await services.events.upcoming([squad.id], now=at(date(2026, 10, 1), 12))

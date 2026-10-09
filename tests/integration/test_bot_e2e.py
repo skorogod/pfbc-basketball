@@ -6,13 +6,15 @@ HTTP к Telegram подменён записывающей сессией: от�
 import asyncio
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, time, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import DeleteMessage, SendMessage, TelegramMethod
+from aiogram.methods import DeleteMessage, SendMessage, SetMyCommands, TelegramMethod
 from aiogram.types import (
+    BotCommandScopeChat,
     CallbackQuery,
     Chat,
     ChatMemberLeft,
@@ -25,12 +27,17 @@ from aiogram.types import (
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from pfbc_bot.bot.factory import create_dispatcher
-from pfbc_bot.bot.keyboards.common import Choice, ItemAction
+from pfbc_bot.bot.keyboards.common import Choice, ItemAction, SquadPick
 from pfbc_bot.bot.middlewares.access import to_telegram_user
 from pfbc_bot.bot.routers.admin import AdminAction, RoleAction
+from pfbc_bot.bot.routers.events import TournamentLink
+from pfbc_bot.bot.routers.permissions import PermAction
 from pfbc_bot.domain.dates import local_to_utc
 from pfbc_bot.domain.enums import SquadRole, TrainingStatus
+from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.repositories.uow import UowFactory
+from pfbc_bot.schemas.events import EventCreate
+from pfbc_bot.schemas.payments import GamePaymentCreate, PaymentDetails, PaymentMethod
 from pfbc_bot.schemas.trainings import TrainingCreate
 from pfbc_bot.services.container import Services
 from pfbc_bot.texts import ru
@@ -163,12 +170,15 @@ async def test_access_bind_join_register_leave(
     await harness.member(1, joined=True)
     assert notifier.to(GROUP_ID) == [] and harness.session.texts_to(GROUP_ID) == []
 
-    # регистрация по ссылке из /invite: ФИО → дата рождения → пропуск mtgame → согласие
+    # регистрация по ссылке из /invite: ФИО → дата рождения → пропуск mtgame → телефон →
+    # согласие
     await harness.private(1, "/start reg_1")
     await harness.private(1, "Иванов Иван")
     await harness.private(1, "32.13.2000")  # некорректная дата — переспрашиваем
     await harness.private(1, "21.03.2005")
     await harness.press(1, Choice(flow="reg", value="skip").pack())
+    await harness.private(1, "12345")  # некорректный телефон — переспрашиваем
+    await harness.private(1, "8 (999) 123-45-67")
     await harness.press(1, Choice(flow="reg", value="consent").pack())
     texts = harness.session.texts_to(1)
     assert ru.CLUB_INFO in texts and ru.REG_ASK_BIRTH in texts
@@ -176,6 +186,7 @@ async def test_access_bind_join_register_leave(
     async with uow_factory() as uow:
         user = await uow.users.get_by_tg_id(1)
         assert user is not None and user.full_name == "Иванов Иван" and user.pd_consent_at
+        assert user.phone == "+79991234567"
 
     # удалён из группы → команды больше не принимаются; отказ уже сообщался — бот молчит
     await harness.member(1, joined=False)
@@ -211,7 +222,9 @@ async def test_roles_invite_and_settings_in_private_chat(
     await harness.press(ADMIN_TG_ID, AdminAction(action="add").pack())
     await harness.press(ADMIN_TG_ID, AdminAction(action="grant", user_id=coach_id).pack())
     assert (await ctx_of(services, COACH)).is_admin
-    assert ru.ADMIN_GRANTED.format(name="user100") in harness.session.texts_to(ADMIN_TG_ID)
+    assert ru.ADMIN_GRANTED.format(
+        name='<a href="tg://user?id=100">user100</a>'
+    ) in harness.session.texts_to(ADMIN_TG_ID)
     await harness.press(ADMIN_TG_ID, AdminAction(action="revoke", user_id=coach_id).pack())
     assert not (await ctx_of(services, COACH)).is_admin
 
@@ -222,10 +235,11 @@ async def test_roles_invite_and_settings_in_private_chat(
     assert harness.session.texts_to(PLAYER)[-1] == ru.NO_SQUADS_FOR_ACTION
 
     # /set: ключ состава → применяется к составу; глобальный — сразу; неизвестный — отказ
+    admin = await ctx_of(services, ADMIN_TG_ID)
     await harness.private(ADMIN_TG_ID, "/set duty_count 3")
-    assert (await services.settings.get_squad(squad.id)).duty_count == 3
+    assert (await services.settings.get_squad(admin, squad.id)).duty_count == 3
     await harness.private(ADMIN_TG_ID, "/set inactive_retention_days 180")
-    assert (await services.settings.get_global()).inactive_retention_days == 180
+    assert (await services.settings.get_global(admin)).inactive_retention_days == 180
     await harness.private(ADMIN_TG_ID, "/set no_such_key 1")
     assert harness.session.texts_to(ADMIN_TG_ID)[-1] == ru.SETTINGS_UNKNOWN.format(
         key="no_such_key"
@@ -293,7 +307,7 @@ async def test_accidental_duty_button_press_changes_nothing(
 
     # опрос — с полуночи, чтобы тест не зависел от времени суток
     await services.settings.set_squad_value(
-        squad.id, "training_poll_time", "00:00", actor_user_id=None
+        await ctx_of(services, ADMIN_TG_ID), squad.id, "training_poll_time", "00:00"
     )
     starts = datetime.now(UTC) + timedelta(hours=2)
     training = await services.trainings.add_one_off(
@@ -417,3 +431,396 @@ async def test_group_message_discovers_member_who_joined_before_bot(
         )
     )
     assert await services.access.load_context(to_telegram_user(_user(6))) is None
+
+
+async def test_review_with_default_time_and_tournament_links(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """/review: название и время по умолчанию кнопками → пост и опрос; /tournaments: админ
+    привязывает матч к турниру."""
+    await bind(harness)
+    await harness.member(COACH, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach_id = (await ctx_of(services, COACH)).user.id
+    await services.squads.set_role(admin, squad.id, coach_id, SquadRole.COACH, grant=True)
+    day = (datetime.now(UTC) + timedelta(days=3)).date()
+    training_at = local_to_utc(day, time(19, 0), MSK)
+    await services.trainings.add_one_off(
+        await ctx_of(services, COACH),
+        TrainingCreate(squad_id=squad.id, starts_at=training_at, venue="Зал №5"),
+    )
+
+    await harness.private(COACH, "/review")
+    await harness.press(COACH, Choice(flow="ev_title", value="default").pack())
+    assert ru.EVENT_ASK_WHEN_REVIEW in harness.session.texts_to(COACH)[-1]
+    await harness.press(COACH, Choice(flow="ev_when", value="default").pack())
+    await harness.press(COACH, Choice(flow="ev_dur", value="60").pack())
+    await harness.press(COACH, Choice(flow="ev_place", value="skip").pack())
+    await harness.press(COACH, Choice(flow="ev_descr", value="skip").pack())
+    await harness.press(COACH, Choice(flow="ev_pub", value="yes").pack())
+
+    assert ru.EVENT_PUBLISHED_WITH_POLL in harness.session.texts_to(COACH)[-1]
+    assert "Разбор игры: Разбор игры" in notifier.polls[-1][1]
+    events = await services.events.upcoming([squad.id])
+    assert [(e.type, e.starts_at) for e, _, _ in events] == [
+        ("review", training_at - timedelta(hours=1))
+    ]
+
+    tournament = await services.events.create(
+        admin,
+        EventCreate(
+            squad_id=squad.id,
+            type="tournament",
+            title="Кубок",
+            starts_at=training_at + timedelta(days=1),
+            is_season=True,
+        ),
+    )
+    match = await services.events.create(
+        admin,
+        EventCreate(
+            squad_id=squad.id,
+            type="match",
+            title="Финал",
+            starts_at=training_at + timedelta(days=2),
+            duration_minutes=120,
+        ),
+    )
+    await harness.private(COACH, "/tournaments")  # турниры ведёт тренер
+    assert harness.session.texts_to(COACH)[-1] == ru.TOURNAMENTS_HEADER
+    await harness.private(ADMIN_TG_ID, "/tournaments")
+    await harness.press(
+        ADMIN_TG_ID, ItemAction(kind="trn", action="open", item_id=tournament.id).pack()
+    )
+    await harness.press(
+        ADMIN_TG_ID,
+        TournamentLink(tournament_id=tournament.id, match_id=match.id, link=1).pack(),
+    )
+    card = await services.events.tournament_card(admin, tournament.id)
+    assert [m.tournament_id for m in card.matches] == [tournament.id]
+
+
+async def test_tournament_season_and_review_offer_via_bot(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """/event_add турнира: дата неизвестна + «Сезон»; предложение разбора после матча → «Да»."""
+    await bind(harness)
+    await harness.member(COACH, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach_id = (await ctx_of(services, COACH)).user.id
+    await services.squads.set_role(admin, squad.id, coach_id, SquadRole.COACH, grant=True)
+
+    await harness.private(COACH, "/event_add")
+    await harness.press(COACH, Choice(flow="ev_type", value="tournament").pack())
+    await harness.private(COACH, "Лига ABL")
+    assert harness.session.texts_to(COACH)[-1] == ru.TOURNAMENT_ASK_START
+    await harness.press(COACH, Choice(flow="ev_tstart", value="unknown").pack())
+    await harness.press(COACH, Choice(flow="ev_tlen", value="season").pack())
+    assert harness.session.texts_to(COACH)[-1] == ru.TOURNAMENT_ASK_GAME_PRICE
+    await harness.private(COACH, "15 000")
+    await harness.press(COACH, Choice(flow="ev_place", value="skip").pack())
+    await harness.press(COACH, Choice(flow="ev_descr", value="skip").pack())
+    await harness.press(COACH, Choice(flow="ev_pub", value="yes").pack())
+    assert ru.EVENT_PUBLISHED_WITH_POLL in harness.session.texts_to(COACH)[-1]
+    assert "Лига ABL, сезон" in notifier.polls[-1][1]
+    [league] = [t for t, _, _ in await services.events.tournaments(admin)]
+    assert league.game_price == Decimal("15000.00")
+
+    # прошёл матч → тренеру предложение → «Да» → время по умолчанию → «Да, …»
+    day = (datetime.now(UTC) + timedelta(days=3)).date()
+    training_at = local_to_utc(day, time(19, 0), MSK)
+    await services.trainings.add_one_off(
+        await ctx_of(services, COACH),
+        TrainingCreate(squad_id=squad.id, starts_at=training_at, venue="Зал №5"),
+    )
+    played = datetime.now(UTC) + timedelta(hours=1)
+    match = await services.events.create(
+        admin, EventCreate(squad_id=squad.id, type="match", title="Финал", starts_at=played)
+    )
+    assert await services.events.offer_reviews(now=played + timedelta(hours=2)) == 1
+    await harness.press(COACH, f"review:yes:{match.id}")
+    proposal = harness.session.texts_to(COACH)[-1]
+    assert "Финал" in proposal and "Опубликовать в группе с опросом?" in proposal
+    review_at = training_at - timedelta(hours=1)
+    await harness.press(COACH, f"review:ok:{match.id}:{int(review_at.timestamp())}")
+    assert "Разбор игры: Финал" in notifier.polls[-1][1]
+    events = await services.events.upcoming([squad.id])
+    assert [(e.type, e.starts_at) for e, _, _ in events if e.type == "review"] == [
+        ("review", review_at)
+    ]
+
+
+async def test_match_add_starts_with_tournament_choice(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    await bind(harness)
+    await harness.member(COACH, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach_id = (await ctx_of(services, COACH)).user.id
+    await services.squads.set_role(admin, squad.id, coach_id, SquadRole.COACH, grant=True)
+    league = await services.events.create(
+        admin, EventCreate(squad_id=squad.id, type="tournament", title="ABL", is_season=True)
+    )
+
+    day = (datetime.now(UTC) + timedelta(days=10)).date()
+    await harness.private(COACH, "/event_add")
+    await harness.press(COACH, Choice(flow="ev_type", value="match").pack())
+    assert harness.session.texts_to(COACH)[-1] == ru.MATCH_ASK_TOURNAMENT
+    await harness.press(COACH, Choice(flow="ev_trn", value=str(league.id)).pack())
+    assert harness.session.texts_to(COACH)[-1] == ru.EVENT_ASK_TITLE
+    await harness.private(COACH, "PFBC — Динамо")
+    await harness.private(COACH, f"{day:%d.%m.%Y} 12:00")
+    await harness.press(COACH, Choice(flow="ev_dur", value="120").pack())
+    await harness.press(COACH, Choice(flow="ev_place", value="skip").pack())
+    await harness.press(COACH, Choice(flow="ev_descr", value="skip").pack())
+    await harness.press(COACH, Choice(flow="ev_pub", value="yes").pack())
+
+    assert "🏆 Турнир: ABL" in notifier.to(GROUP_ID)[-1].text
+    assert "(турнир «ABL»)" in notifier.polls[-1][1]
+    [(match, _, _)] = await services.events.upcoming([squad.id])
+    assert match.tournament_id == league.id
+
+
+async def test_cancel_removes_question_without_reply(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """«Отмена» в вопросе подтверждения: вопрос удаляется, сообщения «Отменено» нет —
+    его легко принять за отмену самого события."""
+    await bind(harness)
+    await harness.member(COACH, joined=True)
+    for data in (
+        ItemAction(kind="confirm", action="no", item_id=0).pack(),  # тренировка, расписание
+        "duty:no",  # дежурства
+        "review:no:1",  # предложение разбора
+    ):
+        sent_before = len(harness.session.texts_to(COACH))
+        deleted_before = sum(isinstance(r, DeleteMessage) for r in harness.session.requests)
+        await harness.press(COACH, data)
+        assert len(harness.session.texts_to(COACH)) == sent_before, data
+        deleted = sum(isinstance(r, DeleteMessage) for r in harness.session.requests)
+        assert deleted == deleted_before + 1, data
+
+
+async def test_game_pay_with_suggested_amount_and_new_details(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """/game_pay: игра турнира → сумма «стоимость ÷ игроки» → сутки → свой телефон → банк →
+    предпросмотр → публикация поста и опроса «Оплатил»; реквизиты запоминаются."""
+    await bind(harness)
+    for tg_id in (COACH, 1, 2):
+        await harness.member(tg_id, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach = await ctx_of(services, COACH)
+    await services.squads.set_role(admin, squad.id, coach.user.id, SquadRole.COACH, grant=True)
+    await services.registration.update_field(coach.user.id, "phone", "8 999 123 45 67")
+
+    cup = await services.events.create(
+        admin,
+        EventCreate(
+            squad_id=squad.id,
+            type="tournament",
+            title="Кубок",
+            is_season=True,
+            game_price=Decimal("15000"),
+        ),
+    )
+    match = await services.events.create(
+        admin,
+        EventCreate(
+            squad_id=squad.id,
+            type="match",
+            title="Финал",
+            starts_at=datetime.now(UTC) + timedelta(days=3),
+            tournament_id=cup.id,
+            notify_group=True,
+        ),
+    )
+    for tg_id in (1, 2):  # оба — «Буду (игрок)»
+        await services.polls.record_answer("poll-1", tg_id, [1])
+
+    await harness.private(COACH, "/game_pay")
+    await harness.press(COACH, ItemAction(kind="gp", action="match", item_id=match.id).pack())
+    await harness.press(COACH, Choice(flow="gp_amount", value="suggested").pack())
+    await harness.press(COACH, Choice(flow="gp_deadline", value="day").pack())
+    assert harness.session.texts_to(COACH)[-1].startswith(ru.GAME_PAYMENT_ASK_COLLECTOR)
+    await harness.press(COACH, Choice(flow="gp_collector", value=str(coach.user.id)).pack())
+    await harness.press(COACH, Choice(flow="pd_method", value="phone").pack())
+    await harness.press(COACH, Choice(flow="pd_phone", value="mine").pack())
+    await harness.private(COACH, "Сбербанк")
+    preview = harness.session.texts_to(COACH)[-1]
+    assert "Сумма: 7 500 ₽" in preview and "+7 999 123-45-67" in preview and "Кубок" in preview
+    await harness.press(COACH, Choice(flow="gp_pub", value="yes").pack())
+
+    assert notifier.polls[-1][1] == "💰 Оплата игры «Финал»: 7 500 ₽"
+    assert "Сумма: 7 500 ₽" in notifier.to(GROUP_ID)[-1].text
+    saved = await services.game_payments.saved_details(coach.user.id)
+    assert saved is not None and saved.value == "+79991234567" and saved.bank == "Сбербанк"
+
+
+async def test_permissions_admin_toggles_role(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """/permissions: админ выключает у капитана «Собрания» — /event_add капитану недоступен;
+    «Сбросить по умолчанию» — снова доступен (в выборе типа — только «Собрание»). Сбор денег
+    капитану не включить (🔒)."""
+    await bind(harness)
+    await harness.member(COACH, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    captain_id = (await ctx_of(services, COACH)).user.id
+    await services.squads.set_role(admin, squad.id, captain_id, SquadRole.CAPTAIN, grant=True)
+
+    await harness.private(COACH, "/permissions")
+    assert harness.session.texts_to(COACH)[-1] == ru.NO_PERMISSION
+
+    await harness.private(ADMIN_TG_ID, "/permissions")
+    await harness.press(ADMIN_TG_ID, PermAction(action="role", role="captain").pack())
+    await harness.press(
+        ADMIN_TG_ID, PermAction(action="toggle", role="captain", perm="meetings").pack()
+    )
+    await harness.private(COACH, "/event_add")
+    assert harness.session.texts_to(COACH)[-1] == ru.NO_SQUADS_FOR_ACTION
+
+    await harness.press(ADMIN_TG_ID, PermAction(action="reset", role="captain").pack())
+    await harness.private(COACH, "/event_add")
+    assert harness.session.texts_to(COACH)[-1] == ru.EVENT_ASK_TYPE  # шаг — как у всех
+    types = harness.session.requests[-1].reply_markup.inline_keyboard  # type: ignore[attr-defined]
+    assert [b.text for row in types for b in row] == ["Собрание"]
+    await harness.press(COACH, Choice(flow="ev_type", value="meeting").pack())
+    assert harness.session.texts_to(COACH)[-1] == ru.EVENT_ASK_TITLE
+    await harness.press(COACH, Choice(flow="ev_type", value="match").pack())  # подделка
+    assert harness.session.texts_to(COACH)[-1] == ru.EVENT_ASK_TITLE  # ничего не произошло
+
+    await harness.press(
+        ADMIN_TG_ID, PermAction(action="locked", role="captain", perm="game_payments").pack()
+    )
+    assert not (await ctx_of(services, COACH)).can(squad.id, Permission.GAME_PAYMENTS)
+
+
+async def test_forged_buttons_are_refused(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """Кнопки админки и /invite с подделанными данными: игрок ничего не получает."""
+    await bind(harness)
+    await harness.member(PLAYER, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    sent_before = len(harness.session.texts_to(PLAYER))
+    for data in (
+        SquadPick(flow="invite", squad_id=squad.id).pack(),
+        SquadPick(flow="roles", squad_id=squad.id).pack(),
+        SquadPick(flow="admin_add", squad_id=squad.id).pack(),
+        SquadPick(flow="settings_show", squad_id=squad.id).pack(),
+        Choice(flow="settings_show", value="global").pack(),
+        RoleAction(squad_id=squad.id, user_id=1, action="open").pack(),
+    ):
+        await harness.press(PLAYER, data)
+    assert len(harness.session.texts_to(PLAYER)) == sent_before  # ни ссылки, ни списков
+
+
+async def test_payment_block_only_for_coach(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """/attendance по матчу: «кто придёт» видят все, блок оплаты — только тренер и админ."""
+    await bind(harness)
+    for tg_id in (COACH, PLAYER, 3):
+        await harness.member(tg_id, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach = await ctx_of(services, COACH)
+    await services.squads.set_role(admin, squad.id, coach.user.id, SquadRole.COACH, grant=True)
+    captain_id = (await ctx_of(services, 3)).user.id
+    await services.squads.set_role(admin, squad.id, captain_id, SquadRole.CAPTAIN, grant=True)
+    coach = await ctx_of(services, COACH)
+    match = await services.events.create(
+        coach,
+        EventCreate(
+            squad_id=squad.id,
+            type="match",
+            title="Финал",
+            starts_at=datetime.now(UTC) + timedelta(days=3),
+            notify_group=True,
+        ),
+    )
+    await services.game_payments.save_details(
+        coach, PaymentDetails(method=PaymentMethod.PHONE, value="+79991234567", bank="Сбер")
+    )
+    await services.game_payments.create(
+        coach,
+        GamePaymentCreate(
+            match_event_id=match.id,
+            collector_user_id=coach.user.id,
+            amount=Decimal("1000"),
+            details=PaymentDetails(method=PaymentMethod.PHONE, value="+79991234567", bank="Сбер"),
+        ),
+    )
+    for tg_id, has_block in ((COACH, True), (PLAYER, False), (3, False)):
+        await harness.press(tg_id, ItemAction(kind="ev", action="att", item_id=match.id).pack())
+        summary = harness.session.texts_to(tg_id)[-1]
+        assert "Финал" in summary
+        assert ("Оплата:" in summary) is has_block, tg_id
+
+
+async def test_command_mid_dialog_exits_it(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """Команда посреди диалога — не ввод: «/game_pay» не станет названием события."""
+    await bind(harness)
+    await harness.member(COACH, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach_id = (await ctx_of(services, COACH)).user.id
+    await services.squads.set_role(admin, squad.id, coach_id, SquadRole.COACH, grant=True)
+
+    await harness.private(COACH, "/event_add")
+    await harness.press(COACH, Choice(flow="ev_type", value="meeting").pack())
+    assert harness.session.texts_to(COACH)[-1] == ru.EVENT_ASK_TITLE
+    await harness.private(COACH, "/help")  # посреди ввода названия
+    assert "Ваши функции" in harness.session.texts_to(COACH)[-1]
+    await harness.private(COACH, "Собрание")  # диалога больше нет — это не название
+    assert harness.session.texts_to(COACH)[-1] != ru.EVENT_ASK_WHEN
+
+
+async def test_command_menu_follows_permissions(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """Меню команд у каждого своё: у игрока нет /game_pay, у тренера — есть."""
+    # свои ID: диспетчер (и кеш меню в нём) общий на всю сессию тестов
+    coach_tg, player_tg = 7701, 7702
+    await bind(harness)
+    for tg_id in (coach_tg, player_tg):
+        await harness.member(tg_id, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach_id = (await ctx_of(services, coach_tg)).user.id
+    await services.squads.set_role(admin, squad.id, coach_id, SquadRole.COACH, grant=True)
+
+    def menu(chat_id: int) -> list[str]:
+        sets = [
+            r
+            for r in harness.session.requests
+            if isinstance(r, SetMyCommands)
+            and isinstance(r.scope, BotCommandScopeChat)
+            and r.scope.chat_id == chat_id
+        ]
+        return [c.command for c in sets[-1].commands] if sets else []
+
+    await harness.private(player_tg, "/help")
+    await harness.private(coach_tg, "/help")
+    assert "game_pay" not in menu(player_tg) and "attendance" in menu(player_tg)
+    assert {"game_pay", "event_add", "schedule"} <= set(menu(coach_tg))
+    requests = len(harness.session.requests)
+    await harness.private(player_tg, "/help")  # меню не менялось — повторно не ставится
+    assert not any(isinstance(r, SetMyCommands) for r in harness.session.requests[requests:])

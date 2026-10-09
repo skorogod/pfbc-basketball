@@ -3,6 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from pfbc_bot.domain.enums import MembershipStatus, SquadRole, TopicPurpose
+from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.schemas.base import DTO
 from pfbc_bot.schemas.users import UserDTO
 
@@ -53,6 +54,8 @@ class UserContext(BaseModel):
     user: UserDTO
     is_admin: bool
     roles: dict[int, frozenset[SquadRole]] = Field(default_factory=dict)  # squad_id → роли
+    # squad_id → права (объединение прав ролей); что можно делать — решают права, не роли
+    permissions: dict[int, frozenset[Permission]] = Field(default_factory=dict)
 
     @property
     def squad_ids(self) -> list[int]:
@@ -70,6 +73,17 @@ class UserContext(BaseModel):
         if self.is_admin:
             return True
         return bool(self.roles.get(squad_id, frozenset()) & set(roles))
+
+    def can(self, squad_id: int, permission: Permission) -> bool:
+        """Можно ли действие в составе. Админ может всё."""
+        return self.is_admin or permission in self.permissions.get(squad_id, frozenset())
+
+    def squads_with(self, permission: Permission) -> list[int]:
+        """Составы пользователя, где у него есть право (админ — все свои составы)."""
+        return [sid for sid in self.squad_ids if self.can(sid, permission)]
+
+    def can_anywhere(self, permission: Permission) -> bool:
+        return self.is_admin or bool(self.squads_with(permission))
 
     def squads_with_roles(self, *roles: SquadRole) -> list[int]:
         """Составы, где у пользователя есть одна из ролей (админ — все свои составы)."""

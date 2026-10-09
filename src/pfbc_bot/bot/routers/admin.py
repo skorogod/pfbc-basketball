@@ -42,6 +42,14 @@ class RoleAction(CallbackData, prefix="rl"):
     action: str  # "open" | "<role>-1" (выдать) | "<role>-0" (снять)
 
 
+async def _admin_only(callback: CallbackQuery, ctx: UserContext) -> bool:
+    """Кнопки админки — только админу (кнопку можно подделать в неофициальном клиенте)."""
+    if ctx.is_admin:
+        return True
+    await callback.answer(ru.NO_PERMISSION, show_alert=True)
+    return False
+
+
 # --- разовая привязка в группе ---
 @router.message(Command("bind"), in_group)
 async def cmd_bind(
@@ -97,6 +105,14 @@ async def _reply_privately(message: Message, text: str) -> None:
         await message.answer(f"{text}\n\n{ru.DM_UNAVAILABLE}")
 
 
+def _missing_roles(members: list[SquadMemberView]) -> str:
+    """Без капитана сообщения о дежурствах уйдут только админам, без тренера — предложения
+    разбора и итоги сборов; админу стоит назначить роли."""
+    present = {r for m in members for r in m.roles}
+    missing = [ROLE_TITLES[r] for r in (SquadRole.COACH, SquadRole.CAPTAIN) if r not in present]
+    return ru.SQUAD_MISSING_ROLES.format(roles=", ".join(missing)) if missing else ""
+
+
 # --- обзор составов ---
 @router.message(Command("squads"), in_private)
 async def cmd_squads(message: Message, ctx: UserContext, services: Services) -> None:
@@ -111,14 +127,14 @@ async def cmd_squads(message: Message, ctx: UserContext, services: Services) -> 
     for item in overview:
         members = await services.squads.members(item.squad.id)
         staff = [
-            f"{html.escape(m.user.display_name)} ({_roles_text(m.roles & STAFF_ROLES)})"
+            f"{m.user.profile_html} ({_roles_text(m.roles & STAFF_ROLES)})"
             for m in members
             if m.roles & STAFF_ROLES
         ]
         lines.append(
             f"<b>{html.escape(item.squad.name)}</b> — участников: {item.members}, "
             f"группа: {html.escape(item.chat_title or '—')}\n"
-            f"  {'; '.join(staff) or 'тренер и капитан не назначены'}"
+            f"  {'; '.join(staff) or 'тренер и капитан не назначены'}" + _missing_roles(members)
         )
     await message.answer("\n\n".join(lines))
 
@@ -135,8 +151,10 @@ async def cmd_roles(message: Message, ctx: UserContext, services: Services) -> N
 
 @router.callback_query(SquadPick.filter(F.flow == ROLES_FLOW))
 async def on_roles_squad(
-    callback: CallbackQuery, callback_data: SquadPick, services: Services
+    callback: CallbackQuery, callback_data: SquadPick, ctx: UserContext, services: Services
 ) -> None:
+    if not await _admin_only(callback, ctx):
+        return
     await callback.answer()
     if message := callback_message(callback):
         await _show_members(message, await services.squads.get(callback_data.squad_id), services)
@@ -165,6 +183,8 @@ async def _show_members(message: Message, squad: SquadDTO, services: Services) -
 async def on_role_action(
     callback: CallbackQuery, callback_data: RoleAction, ctx: UserContext, services: Services
 ) -> None:
+    if not await _admin_only(callback, ctx):
+        return
     message = callback_message(callback)
     squad = await services.squads.get(callback_data.squad_id)
     if callback_data.action == "open":
@@ -189,7 +209,7 @@ async def on_role_action(
 
 def _role_card(view: SquadMemberView, squad: SquadDTO) -> str:
     return ru.ROLE_CARD.format(
-        name=html.escape(view.user.display_name),
+        name=view.user.profile_html,
         squad=html.escape(squad.name),
         roles=_roles_text(view.roles) or ROLE_TITLES[SquadRole.PLAYER],
     )
@@ -229,7 +249,7 @@ async def _show_admins(message: Message, ctx: UserContext, services: Services) -
     lines = [ru.ADMINS_HEADER]
     builder = InlineKeyboardBuilder()
     for admin in admins:
-        name = html.escape(admin.display_name)
+        name = admin.profile_html
         lines.append(
             (ru.ADMIN_LINE_CONFIG if admin.from_config else ru.ADMIN_LINE).format(name=name)
         )
@@ -257,10 +277,10 @@ async def on_admin_action(
         return
     if callback_data.action == "grant":
         user = await services.admins.grant(ctx, callback_data.user_id)
-        text = ru.ADMIN_GRANTED.format(name=html.escape(user.display_name))
+        text = ru.ADMIN_GRANTED.format(name=user.profile_html)
     else:
         user = await services.admins.revoke(ctx, callback_data.user_id)
-        text = ru.ADMIN_REVOKED.format(name=html.escape(user.display_name))
+        text = ru.ADMIN_REVOKED.format(name=user.profile_html)
     await callback.answer()
     if message is not None:
         await message.answer(text)
@@ -269,8 +289,10 @@ async def on_admin_action(
 
 @router.callback_query(SquadPick.filter(F.flow == ADMIN_ADD_FLOW))
 async def on_admin_squad(
-    callback: CallbackQuery, callback_data: SquadPick, services: Services
+    callback: CallbackQuery, callback_data: SquadPick, ctx: UserContext, services: Services
 ) -> None:
+    if not await _admin_only(callback, ctx):
+        return
     await callback.answer()
     if message := callback_message(callback):
         squad = await services.squads.get(callback_data.squad_id)
@@ -320,18 +342,18 @@ async def cmd_settings(message: Message, ctx: UserContext, services: Services) -
 
 @router.callback_query(SquadPick.filter(F.flow == SETTINGS_SHOW_FLOW))
 async def on_settings_squad(
-    callback: CallbackQuery, callback_data: SquadPick, services: Services
+    callback: CallbackQuery, callback_data: SquadPick, ctx: UserContext, services: Services
 ) -> None:
     await callback.answer()
-    dump = (await services.settings.get_squad(callback_data.squad_id)).model_dump(mode="json")
+    dump = (await services.settings.get_squad(ctx, callback_data.squad_id)).model_dump(mode="json")
     if message := callback_message(callback):
         await message.answer(_settings_text(dump))
 
 
 @router.callback_query(Choice.filter((F.flow == SETTINGS_SHOW_FLOW) & (F.value == "global")))
-async def on_settings_global(callback: CallbackQuery, services: Services) -> None:
+async def on_settings_global(callback: CallbackQuery, ctx: UserContext, services: Services) -> None:
     await callback.answer()
-    dump = (await services.settings.get_global()).model_dump(mode="json")
+    dump = (await services.settings.get_global(ctx)).model_dump(mode="json")
     if message := callback_message(callback):
         await message.answer(_settings_text(dump))
 
@@ -358,7 +380,7 @@ async def cmd_set(
         await message.answer(ru.SETTINGS_USAGE)
         return
     if services.settings.is_global_key(key):
-        await services.settings.set_global_value(key, value, actor_user_id=ctx.user.id)
+        await services.settings.set_global_value(ctx, key, value)
         await message.answer(_saved(key, value, ru.SETTINGS_GLOBAL))
         return
     if not services.settings.is_squad_key(key):
@@ -390,7 +412,7 @@ async def _apply_squad_setting(
     data = await state.get_data()
     await state.clear()
     key, value = str(data["key"]), str(data["value"])
-    await services.settings.set_squad_value(squad.id, key, value, actor_user_id=ctx.user.id)
+    await services.settings.set_squad_value(ctx, squad.id, key, value)
     await message.answer(_saved(key, value, squad.name))
 
 

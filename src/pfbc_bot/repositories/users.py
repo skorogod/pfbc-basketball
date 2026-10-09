@@ -31,6 +31,12 @@ class UsersRepository:
         result = await self._session.scalars(select(User).where(User.id.in_(user_ids)))
         return list(result)
 
+    async def list_by_tg_ids(self, tg_user_ids: Sequence[int]) -> list[User]:
+        if not tg_user_ids:
+            return []
+        stmt = select(User).where(User.tg_user_id.in_(list(tg_user_ids)))
+        return list(await self._session.scalars(stmt))
+
     async def list_admins(self) -> list[User]:
         return list(await self._session.scalars(select(User).where(User.is_admin.is_(True))))
 

@@ -8,34 +8,36 @@
 import html
 from datetime import datetime, timedelta
 
-from pfbc_bot.db.models import Training, TrainingSchedule, User
+from pfbc_bot.db.models import Poll, Training, TrainingSchedule, User
 from pfbc_bot.domain.dates import dates_for_weekday, format_local, local_to_utc, to_local, utcnow
 from pfbc_bot.domain.enums import (
     ACTIVE_TRAINING_STATUSES,
     DutyStatus,
     PollType,
-    SquadRole,
     TopicPurpose,
     TrainingSource,
     TrainingStatus,
 )
+from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.repositories.uow import UnitOfWork, UowFactory
 from pfbc_bot.schemas.squads import UserContext
 from pfbc_bot.schemas.trainings import ScheduleCreate, ScheduleDTO, TrainingCreate, TrainingDTO
-from pfbc_bot.services.common import send_direct, send_to_squad, squad_tz
+from pfbc_bot.services.common import (
+    AfterCommit,
+    deferred_to_squad,
+    run_after_commit,
+    send_direct,
+    squad_tz,
+)
 from pfbc_bot.services.duty import duty_key
-from pfbc_bot.services.errors import Conflict, NotFound, PermissionDenied
+from pfbc_bot.services.errors import Conflict, NotFound
+from pfbc_bot.services.permissions import require
 from pfbc_bot.services.polls import poll_key
 from pfbc_bot.services.ports import Notifier
 from pfbc_bot.texts import ru
 
 MATERIALIZE_DAYS = 14
 TRAINING_REF = "training"
-
-
-def require_coach(actor: UserContext, squad_id: int) -> None:
-    if not actor.has_role(squad_id, SquadRole.COACH):
-        raise PermissionDenied(ru.NO_PERMISSION)
 
 
 class TrainingService:
@@ -47,7 +49,7 @@ class TrainingService:
     async def add_schedule(
         self, actor: UserContext, data: ScheduleCreate, *, now: datetime | None = None
     ) -> ScheduleDTO:
-        require_coach(actor, data.squad_id)
+        require(actor, data.squad_id, Permission.SCHEDULE)
         async with self._uow_factory() as uow:
             schedule = await uow.trainings.add_schedule(TrainingSchedule(**data.model_dump()))
             await uow.system.audit(
@@ -81,10 +83,11 @@ class TrainingService:
             schedule = await uow.trainings.get_schedule(schedule_id)
             if schedule is None or not schedule.is_active:
                 raise NotFound("Запись расписания не найдена")
-            require_coach(actor, schedule.squad_id)
+            require(actor, schedule.squad_id, Permission.SCHEDULE)
             schedule.is_active = False
+            after = []
             for training in await uow.trainings.list_future_from_schedule(schedule_id, now):
-                await self._cancel(uow, training, announce=False)
+                after += await self._cancel(uow, training, announce=False, now=now)
             await uow.system.audit(
                 actor_user_id=actor.user.id,
                 action="schedule.remove",
@@ -92,6 +95,7 @@ class TrainingService:
                 entity_id=schedule_id,
             )
             await uow.commit()
+        await run_after_commit(after)
 
     # --- материализация ---
     async def materialize(self, *, now: datetime | None = None) -> int:
@@ -157,7 +161,7 @@ class TrainingService:
     async def add_one_off(
         self, actor: UserContext, data: TrainingCreate, *, now: datetime | None = None
     ) -> TrainingDTO:
-        require_coach(actor, data.squad_id)
+        require(actor, data.squad_id, Permission.SCHEDULE)
         if data.starts_at <= (now or utcnow()):
             raise Conflict(ru.PAST_DATE)
         async with self._uow_factory() as uow:
@@ -180,8 +184,8 @@ class TrainingService:
     ) -> TrainingDTO:
         async with self._uow_factory() as uow:
             training = await self._get_upcoming(uow, training_id, now or utcnow())
-            require_coach(actor, training.squad_id)
-            await self._cancel(uow, training, announce=True)
+            require(actor, training.squad_id, Permission.SCHEDULE)
+            after = await self._cancel(uow, training, announce=True, now=now or utcnow())
             await uow.system.audit(
                 actor_user_id=actor.user.id,
                 action="training.cancel",
@@ -189,6 +193,7 @@ class TrainingService:
                 entity_id=training_id,
             )
             await uow.commit()
+            await run_after_commit(after)
             return TrainingDTO.model_validate(training)
 
     async def move(
@@ -204,23 +209,25 @@ class TrainingService:
             raise Conflict(ru.PAST_DATE)
         async with self._uow_factory() as uow:
             training = await self._get_upcoming(uow, training_id, now)
-            require_coach(actor, training.squad_id)
+            require(actor, training.squad_id, Permission.SCHEDULE)
             tz = squad_tz(await uow.squads.get(training.squad_id))
             old = training.starts_at
             training.starts_at = new_starts_at
             training.status = TrainingStatus.MOVED
-            await self._reset_poll(uow, training, now)
+            after = [await self._reset_poll(uow, training, now)]
             removed = await self._reset_duties(uow, training)
-            await send_to_squad(
-                uow,
-                self._notifier,
-                training.squad_id,
-                TopicPurpose.TRAININGS,
-                ru.TRAINING_MOVED_GROUP.format(
-                    old=format_local(old, tz),
-                    new=format_local(new_starts_at, tz),
-                    venue=html.escape(training.venue),
-                ),
+            after.append(
+                await deferred_to_squad(
+                    uow,
+                    self._notifier,
+                    training.squad_id,
+                    TopicPurpose.TRAININGS,
+                    ru.TRAINING_MOVED_GROUP.format(
+                        old=format_local(old, tz),
+                        new=format_local(new_starts_at, tz),
+                        venue=html.escape(training.venue),
+                    ),
+                )
             )
             await uow.system.audit(
                 actor_user_id=actor.user.id,
@@ -230,6 +237,7 @@ class TrainingService:
                 payload={"from": old.isoformat(), "to": new_starts_at.isoformat()},
             )
             await uow.commit()
+            await run_after_commit(after)  # сообщения — после снятия блокировки
             text = ru.DUTY_MOVED_DM.format(
                 old=format_local(old, tz), new=format_local(new_starts_at, tz)
             )
@@ -248,13 +256,22 @@ class TrainingService:
             raise Conflict(ru.TRAINING_ALREADY_STARTED)
         return training
 
-    async def _reset_poll(self, uow: UnitOfWork, training: Training, now: datetime) -> None:
-        """Опрос на старое время закрывается; новый опубликует планировщик по новому времени."""
+    async def _reset_poll(self, uow: UnitOfWork, training: Training, now: datetime) -> AfterCommit:
+        """Опрос на старое время закрывается (в Telegram — после commit); новый опубликует
+        планировщик по новому времени."""
         poll = await uow.polls.get_for_ref(PollType.TRAINING, TRAINING_REF, training.id)
         if poll is not None:
-            poll.superseded_at = now
-            await self._notifier.stop_poll(poll.chat_id, poll.message_id)
+            await uow.polls.supersede(poll, now)
         await uow.system.release_reminder(poll_key(training.id))
+        return self._stop_poll(poll)
+
+    def _stop_poll(self, poll: Poll | None) -> AfterCommit:
+        async def stop() -> object:
+            if poll is None:
+                return None
+            return await self._notifier.stop_poll(poll.chat_id, poll.message_id)
+
+        return stop
 
     @staticmethod
     async def _reset_duties(uow: UnitOfWork, training: Training) -> list[User]:
@@ -270,18 +287,30 @@ class TrainingService:
         training.duty_chat_id = training.duty_message_id = None  # объявление будет новым
         return await uow.users.list_by_ids(assigned)
 
-    async def _cancel(self, uow: UnitOfWork, training: Training, *, announce: bool) -> None:
+    async def _cancel(
+        self, uow: UnitOfWork, training: Training, *, announce: bool, now: datetime
+    ) -> list[AfterCommit]:
+        """Отмена: дежурства снимаются, опрос закрывается (ответы больше ни на что не влияют).
+        Возвращает отправки в Telegram — выполнить после commit."""
         training.status = TrainingStatus.CANCELLED
         await uow.trainings.cancel_duties(training.id)
         poll = await uow.polls.get_for_ref(PollType.TRAINING, TRAINING_REF, training.id)
+        after = []
+        if poll is not None:
+            await uow.polls.supersede(poll, now)
+            after.append(self._stop_poll(poll))
         if announce or poll is not None:  # если опрос уже был — команду нужно предупредить
             tz = squad_tz(await uow.squads.get(training.squad_id))
-            await send_to_squad(
-                uow,
-                self._notifier,
-                training.squad_id,
-                TopicPurpose.TRAININGS,
-                ru.TRAINING_CANCELLED_GROUP.format(
-                    when=format_local(training.starts_at, tz), venue=html.escape(training.venue)
-                ),
+            after.append(
+                await deferred_to_squad(
+                    uow,
+                    self._notifier,
+                    training.squad_id,
+                    TopicPurpose.TRAININGS,
+                    ru.TRAINING_CANCELLED_GROUP.format(
+                        when=format_local(training.starts_at, tz),
+                        venue=html.escape(training.venue),
+                    ),
+                )
             )
+        return after

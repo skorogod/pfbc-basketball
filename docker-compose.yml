@@ -1,9 +1,12 @@
+x-database-url: &database_url postgresql+asyncpg://${POSTGRES_USER:-pfbc}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-pfbc}
+
 x-app: &app
   build: .
   image: pfbc-bot:latest
+  pull_policy: build
   env_file: .env
   environment:
-    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-pfbc}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-pfbc}
+    DATABASE_URL: *database_url
   restart: unless-stopped
   depends_on:
     migrate:
@@ -34,14 +37,15 @@ services:
       postgres:
         condition: service_healthy
 
-  web:
+  bot:
     <<: *app
-    command: ["python", "-m", "pfbc_bot.main_web"]
+    command: ["python", "-m", "pfbc_bot.main"]
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-pfbc}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-pfbc}
-      BOT_MODE: webhook
+      DATABASE_URL: *database_url
+      BOT_MODE: ${BOT_MODE:-pooling}
+      WEB_PORT: ${WEB_PORT:-8080}
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${WEB_PORT:-8080}/healthz')"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -58,12 +62,13 @@ services:
       - "443:443"
     environment:
       DOMAIN: ${DOMAIN:?set DOMAIN}
+      WEB_PORT: ${WEB_PORT:-8080}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - web
+      - bot
 
   backup:
     image: postgres:16-alpine
@@ -71,7 +76,7 @@ services:
     environment:
       PGHOST: postgres
       PGUSER: ${POSTGRES_USER:-pfbc}
-      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       PGDATABASE: ${POSTGRES_DB:-pfbc}
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
     volumes:

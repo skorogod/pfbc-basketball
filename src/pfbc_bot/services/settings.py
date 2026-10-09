@@ -7,7 +7,9 @@ from pydantic import BaseModel, ValidationError
 
 from pfbc_bot.repositories.uow import UnitOfWork, UowFactory
 from pfbc_bot.schemas.settings import GlobalSettings, SquadSettings
-from pfbc_bot.services.errors import DomainError
+from pfbc_bot.schemas.squads import UserContext
+from pfbc_bot.services.errors import DomainError, PermissionDenied
+from pfbc_bot.texts import ru
 
 GLOBAL_SCOPE = "global"
 
@@ -77,26 +79,36 @@ class SettingsService:
     def is_squad_key(key: str) -> bool:
         return has_setting(SquadSettings, key)
 
-    async def get_squad(self, squad_id: int) -> SquadSettings:
+    @staticmethod
+    def _require_admin(actor: UserContext) -> None:
+        """Просмотр и изменение настроек — только админ (сервисы читают их сами)."""
+        if not actor.is_admin:
+            raise PermissionDenied(ru.NO_PERMISSION)
+
+    async def get_squad(self, actor: UserContext, squad_id: int) -> SquadSettings:
+        self._require_admin(actor)
         async with self._uow_factory() as uow:
             return await load_squad_settings(uow, squad_id)
 
-    async def get_global(self) -> GlobalSettings:
+    async def get_global(self, actor: UserContext) -> GlobalSettings:
+        self._require_admin(actor)
         async with self._uow_factory() as uow:
             return await load_global_settings(uow)
 
     async def set_squad_value(
-        self, squad_id: int, key: str, raw_value: str, *, actor_user_id: int | None
+        self, actor: UserContext, squad_id: int, key: str, raw_value: str
     ) -> SquadSettings:
+        self._require_admin(actor)
         return SquadSettings.model_validate(
-            await self._set(squad_scope(squad_id), SquadSettings, key, raw_value, actor_user_id)
+            await self._set(squad_scope(squad_id), SquadSettings, key, raw_value, actor.user.id)
         )
 
     async def set_global_value(
-        self, key: str, raw_value: str, *, actor_user_id: int | None
+        self, actor: UserContext, key: str, raw_value: str
     ) -> GlobalSettings:
+        self._require_admin(actor)
         return GlobalSettings.model_validate(
-            await self._set(GLOBAL_SCOPE, GlobalSettings, key, raw_value, actor_user_id)
+            await self._set(GLOBAL_SCOPE, GlobalSettings, key, raw_value, actor.user.id)
         )
 
     async def _set(

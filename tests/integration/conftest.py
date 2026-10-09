@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import (
 from pfbc_bot.db.base import Base
 from pfbc_bot.repositories.uow import UowFactory, make_uow_factory
 from pfbc_bot.services.container import Services, build_services
+from pfbc_bot.services.permissions import invalidate_permissions_cache
 from pfbc_bot.services.ports import Keyboard, SentPoll
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -55,6 +56,9 @@ class FakeNotifier:
     blocked_dm: set[int] = field(default_factory=set)
     edits: list[tuple[int, int, str]] = field(default_factory=list)
     stopped_polls: list[tuple[int, int]] = field(default_factory=list)
+    deleted: list[tuple[int, int]] = field(default_factory=list)
+    # send_poll с этим порядковым номером не доставлен
+    fail_polls_on: set[int] = field(default_factory=set)
     # отправка с этим порядковым номером не доставлена (notifier вернул None)
     fail_on: set[int] = field(default_factory=set)
     # отправка с этим порядковым номером падает исключением (непредвиденный сбой посреди задачи)
@@ -90,8 +94,14 @@ class FakeNotifier:
         self, chat_id: int, question: str, options: Sequence[str], *, thread_id: int | None = None
     ) -> SentPoll | None:
         self._poll_seq += 1
+        if self._poll_seq in self.fail_polls_on:
+            return None
         self.polls.append((chat_id, question, thread_id))
         return SentPoll(poll_id=f"poll-{self._poll_seq}", message_id=1000 + self._poll_seq)
+
+    async def delete_message(self, chat_id: int, message_id: int) -> bool:
+        self.deleted.append((chat_id, message_id))
+        return True
 
     async def stop_poll(self, chat_id: int, message_id: int) -> bool:
         self.stopped_polls.append((chat_id, message_id))
@@ -142,6 +152,14 @@ async def uow_factory(engine: AsyncEngine) -> UowFactory:
     async with engine.begin() as conn:
         await conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
     return make_uow_factory(async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession))
+
+
+@pytest.fixture(autouse=True)
+def fresh_permissions_cache() -> Iterator[None]:
+    """Кеш таблицы прав живёт в процессе — между тестами (каждый со своей БД) сбрасываем."""
+    invalidate_permissions_cache()
+    yield
+    invalidate_permissions_cache()
 
 
 @pytest.fixture

@@ -3,7 +3,12 @@
 from pfbc_bot.db.models.events import Event
 from pfbc_bot.db.models.greetings import Greeting
 from pfbc_bot.db.models.matches import Match
-from pfbc_bot.db.models.payments import PaymentPeriod, PaymentReceipt, PaymentReminderConfig
+from pfbc_bot.db.models.payments import (
+    GamePayment,
+    PaymentPeriod,
+    PaymentReceipt,
+    PaymentReminderConfig,
+)
 from pfbc_bot.db.models.polls import Poll, PollAnswer
 from pfbc_bot.db.models.squads import (
     Squad,
@@ -21,6 +26,7 @@ __all__ = [
     "DutyAssignment",
     "Event",
     "FsmState",
+    "GamePayment",
     "Greeting",
     "Match",
     "PaymentPeriod",

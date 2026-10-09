@@ -9,7 +9,9 @@ from pfbc_bot.services.admins import AdminService
 from pfbc_bot.services.birthdays import BirthdayService
 from pfbc_bot.services.duty import DutyService
 from pfbc_bot.services.events import EventService
+from pfbc_bot.services.game_payments import GamePaymentService
 from pfbc_bot.services.membership import MembershipService
+from pfbc_bot.services.permissions import PermissionService, Recipients
 from pfbc_bot.services.polls import PollService
 from pfbc_bot.services.ports import Notifier
 from pfbc_bot.services.registration import RegistrationService
@@ -31,13 +33,16 @@ class Services:
     polls: PollService
     birthdays: BirthdayService
     events: EventService
+    game_payments: GamePaymentService
+    permissions: PermissionService
 
 
 def build_services(
     uow_factory: UowFactory, notifier: Notifier, admin_tg_ids: Iterable[int]
 ) -> Services:
     admin_ids = frozenset(admin_tg_ids)
-    duty = DutyService(uow_factory, notifier)
+    recipients = Recipients(admin_ids)
+    duty = DutyService(uow_factory, notifier, recipients)
     membership = MembershipService(uow_factory, notifier, admin_ids, duty=duty)
     return Services(
         access=AccessService(uow_factory, admin_ids),
@@ -50,5 +55,7 @@ def build_services(
         duty=duty,
         polls=PollService(uow_factory, notifier, duty, membership),
         birthdays=BirthdayService(uow_factory, notifier),
-        events=EventService(uow_factory, notifier),
+        events=EventService(uow_factory, notifier, recipients),
+        game_payments=GamePaymentService(uow_factory, notifier, recipients),
+        permissions=PermissionService(uow_factory),
     )

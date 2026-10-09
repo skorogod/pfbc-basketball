@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from pfbc_bot.repositories.uow import UowFactory
 from pfbc_bot.schemas.squads import UserContext
-from pfbc_bot.schemas.users import UserDTO
+from pfbc_bot.schemas.users import UserDTO, profile_link
 from pfbc_bot.services.common import to_dto
 from pfbc_bot.services.errors import Conflict, NotFound, PermissionDenied
 from pfbc_bot.texts import ru
@@ -26,6 +26,11 @@ class AdminView:
     @property
     def display_name(self) -> str:
         return self.user.display_name if self.user else f"id{self.tg_user_id}"
+
+    @property
+    def profile_html(self) -> str:
+        username = self.user.username if self.user else None
+        return profile_link(self.tg_user_id, username, self.display_name)
 
 
 class AdminService:

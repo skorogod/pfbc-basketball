@@ -58,6 +58,8 @@ class PollType(StrEnum):
     TRAINING = "training"
     MATCH = "match"
     REVIEW = "review"
+    TOURNAMENT = "tournament"
+    GAME_PAYMENT = "game_payment"  # «Оплатил» — сбор денег за игру
     CUSTOM = "custom"
 
 
@@ -95,6 +97,7 @@ MATCH_DURATION_MINUTES = 120
 
 class EventType(StrEnum):
     MATCH = "match"
+    REVIEW = "review"  # разбор игры
     CAMP = "camp"
     TOURNAMENT = "tournament"
     MEETING = "meeting"
@@ -103,7 +106,8 @@ class EventType(StrEnum):
 
 EVENT_TYPE_TITLES: dict[EventType, str] = {
     EventType.MATCH: "Матч",
-    EventType.CAMP: "Сбор",
+    EventType.REVIEW: "Разбор игры",
+    EventType.CAMP: "Сборы",
     EventType.TOURNAMENT: "Турнир",
     EventType.MEETING: "Собрание",
     EventType.OTHER: "Прочее",
@@ -118,3 +122,16 @@ ROLE_TITLES: dict[SquadRole, str] = {
 # Варианты ответа опроса на тренировку; индекс YES используется при выборе дежурных.
 TRAINING_POLL_OPTIONS: tuple[str, ...] = ("Да", "Нет", "Опоздаю")
 TRAINING_POLL_YES = 0
+# Варианты ответа опроса участия в событии (разбор игры), в матче и в турнире.
+EVENT_POLL_OPTIONS: tuple[str, ...] = ("Буду", "Не смогу")
+MATCH_POLL_PLAYER = "Буду (игрок)"  # они платят за игру (сбор денег)
+MATCH_POLL_OPTIONS: tuple[str, ...] = (
+    "Буду (тренер)",
+    MATCH_POLL_PLAYER,
+    "Буду (болельщик)",
+    "Не буду",
+)
+# Сбор денег за игру. В опросе Telegram минимум два варианта — второй «Оплачу позже».
+GAME_PAYMENT_PAID = "Оплатил"
+GAME_PAYMENT_POLL_OPTIONS: tuple[str, ...] = (GAME_PAYMENT_PAID, "Оплачу позже")
+TOURNAMENT_POLL_OPTIONS: tuple[str, ...] = ("Участвую", "Не смогу")

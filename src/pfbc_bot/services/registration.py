@@ -5,6 +5,7 @@ from datetime import datetime
 
 from pfbc_bot.domain.dates import parse_date, utcnow
 from pfbc_bot.domain.enums import UserStatus
+from pfbc_bot.domain.payments import normalize_phone
 from pfbc_bot.repositories.uow import UowFactory
 from pfbc_bot.schemas.squads import SquadDTO
 from pfbc_bot.schemas.users import (
@@ -20,7 +21,7 @@ from pfbc_bot.services.membership import anonymize
 from pfbc_bot.services.ports import Notifier
 
 REGISTRATION_START_PREFIX = "reg_"
-EDITABLE_FIELDS = ("full_name", "birth_date", "mtgame_url")
+EDITABLE_FIELDS = ("full_name", "birth_date", "mtgame_url", "phone")
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +62,7 @@ class RegistrationService:
             user.full_name = data.full_name
             user.birth_date = data.birth_date
             user.mtgame_url = data.mtgame_url
+            user.phone = data.phone
             user.guardian_consent = data.guardian_consent
             user.pd_consent_at = now or utcnow()
             user.dm_available = True
@@ -84,6 +86,8 @@ class RegistrationService:
                 user.full_name = validate_full_name(raw_value or "")
             elif field == "birth_date":
                 user.birth_date = validate_birth_date(parse_date(raw_value)) if raw_value else None
+            elif field == "phone":
+                user.phone = normalize_phone(raw_value) if raw_value else None
             else:
                 user.mtgame_url = validate_mtgame_url(raw_value) if raw_value else None
             await uow.commit()

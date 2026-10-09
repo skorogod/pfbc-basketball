@@ -7,6 +7,7 @@ from typing import Self
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from pfbc_bot.repositories.events import EventsRepository
+from pfbc_bot.repositories.game_payments import GamePaymentsRepository
 from pfbc_bot.repositories.matches import MatchesRepository
 from pfbc_bot.repositories.members import MembersRepository
 from pfbc_bot.repositories.polls import PollsRepository
@@ -23,6 +24,7 @@ class UnitOfWork:
     trainings: TrainingsRepository
     polls: PollsRepository
     events: EventsRepository
+    game_payments: GamePaymentsRepository
     matches: MatchesRepository
     system: SystemRepository
 
@@ -37,6 +39,7 @@ class UnitOfWork:
         self.trainings = TrainingsRepository(self.session)
         self.polls = PollsRepository(self.session)
         self.events = EventsRepository(self.session)
+        self.game_payments = GamePaymentsRepository(self.session)
         self.matches = MatchesRepository(self.session)
         self.system = SystemRepository(self.session)
         return self

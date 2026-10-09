@@ -43,10 +43,20 @@ def to_markup(keyboard: Keyboard | None) -> InlineKeyboardMarkup | None:
 
 
 class TelegramNotifier:
-    def __init__(self, bot: Bot, bot_username: str, *, max_attempts: int = 3) -> None:
+    def __init__(
+        self,
+        bot: Bot,
+        bot_username: str,
+        *,
+        max_attempts: int = 3,
+        max_retry_wait: float = 10.0,
+    ) -> None:
         self._bot = bot
         self._bot_username = bot_username
         self._max_attempts = max_attempts
+        # дольше не ждём: отправка часто идёт внутри транзакции, и долгое ожидание держало бы
+        # её (и блокировки) открытой — лучше «не доставлено» и повтор на следующем тике
+        self._max_retry_wait = max_retry_wait
 
     @property
     def bot_username(self) -> str:
@@ -57,7 +67,7 @@ class TelegramNotifier:
             try:
                 return await action()
             except TelegramRetryAfter as exc:
-                if attempt == self._max_attempts:
+                if attempt == self._max_attempts or exc.retry_after > self._max_retry_wait:
                     raise
                 log.warning("telegram_retry_after", seconds=exc.retry_after, attempt=attempt)
                 await asyncio.sleep(exc.retry_after + 0.5)
@@ -158,6 +168,14 @@ class TelegramNotifier:
         if message.poll is None:  # pragma: no cover - Telegram всегда возвращает poll
             return None
         return SentPoll(poll_id=message.poll.id, message_id=message.message_id)
+
+    async def delete_message(self, chat_id: int, message_id: int) -> bool:
+        try:
+            await self._call(lambda: self._bot.delete_message(chat_id, message_id))
+        except TelegramAPIError as exc:
+            log.info("telegram_delete_failed", chat_id=chat_id, error=str(exc))
+            return False
+        return True
 
     async def stop_poll(self, chat_id: int, message_id: int) -> bool:
         try:

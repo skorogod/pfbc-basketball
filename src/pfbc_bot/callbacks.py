@@ -22,6 +22,14 @@ DUTY_FIX_OK = "fixok"  # duty:fixok:<assignment_id>:<user_id> — подтвер
 DUTY_CANCEL = "no"  # duty:no — «Отмена» в вопросе подтверждения
 
 
+# Предложение тренеру после матча — назначить разбор игры (личка):
+REVIEW = "review"
+REVIEW_YES = "yes"  # review:yes:<match_event_id> — показать время по умолчанию
+REVIEW_OK = "ok"  # review:ok:<match_event_id>:<unix-время> — назначить на это время
+REVIEW_TIME = "time"  # review:time:<match_event_id> — ввести другое время
+REVIEW_NO = "no"  # review:no:<match_event_id> — разбор не нужен
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedCallback:
     prefix: str
