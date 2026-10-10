@@ -3,6 +3,7 @@
 Это не оплата тренировок по квитанциям mos.ru (ФТ-8) — другой процесс и другие таблицы.
 Платят ответившие «Буду (игрок)» в опросе участия в матче: после дедлайна каждому, кто не
 отметил «Оплатил», бот пишет в личку, а не дошедших — упоминает в группе (топик «Игры»).
+Сколько раз и с каким интервалом — настройки состава; с 00:00 до 08:00 не напоминает.
 """
 
 import html
@@ -11,7 +12,7 @@ from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 
 from pfbc_bot.db.models import Event, GamePayment, Poll, User
-from pfbc_bot.domain.dates import format_local, utcnow
+from pfbc_bot.domain.dates import due_payment_reminder, format_local, utcnow
 from pfbc_bot.domain.enums import (
     EVENT_TYPE_TITLES,
     GAME_PAYMENT_PAID,
@@ -29,6 +30,7 @@ from pfbc_bot.logging import get_logger
 from pfbc_bot.repositories.uow import UnitOfWork, UowFactory
 from pfbc_bot.schemas.events import EventDTO
 from pfbc_bot.schemas.payments import GamePaymentCreate, GamePaymentDTO, PaymentDetails
+from pfbc_bot.schemas.settings import MAX_PAYMENT_REMINDER_INTERVAL_HOURS, MAX_PAYMENT_REMINDERS
 from pfbc_bot.schemas.squads import UserContext
 from pfbc_bot.schemas.users import UserDTO
 from pfbc_bot.services.common import (
@@ -50,19 +52,26 @@ from pfbc_bot.services.events import (
 )
 from pfbc_bot.services.permissions import Recipients, require
 from pfbc_bot.services.ports import Notifier
+from pfbc_bot.services.settings import load_squad_settings
 from pfbc_bot.texts import ru
 
 log = get_logger(__name__)
 
-DEFAULT_DEADLINE = timedelta(days=1)
 # игры для сбора: недавно сыгранные (собирают и после) и предстоящие
 MATCHES_WINDOW = (timedelta(days=14), timedelta(days=60))
-# дедлайн прошёл давно (бот был выключен) — не напоминаем
+# напоминание давно пропущено (бот был выключен) — не догоняем
 REMINDER_GRACE = timedelta(days=2)
+# сборы, по которым ещё может быть напоминание: последнее — через (count − 1) × interval
+REMINDER_LOOKBACK = (
+    timedelta(hours=(MAX_PAYMENT_REMINDERS - 1) * MAX_PAYMENT_REMINDER_INTERVAL_HOURS)
+    + REMINDER_GRACE
+)
 
 
-def reminder_key(payment_id: int) -> str:
-    return f"game_payment:{payment_id}"
+def reminder_key(payment_id: int, number: int = 0) -> str:
+    """Отметка напоминания. У первого — ключ без номера, как до появления повторных."""
+    base = f"game_payment:{payment_id}"
+    return base if number == 0 else f"{base}:{number}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +151,15 @@ class GamePaymentService:
         if not collector.payment_details:
             raise Conflict(ru.GAME_PAYMENT_COLLECTOR_NOT_ALLOWED)
         return PaymentDetails.model_validate(collector.payment_details)
+
+    async def default_deadline(
+        self, actor: UserContext, squad_id: int, *, now: datetime | None = None
+    ) -> datetime:
+        """Срок по умолчанию — через game_payment_deadline_hours (сутки)."""
+        require(actor, squad_id, Permission.GAME_PAYMENTS)
+        async with self._uow_factory() as uow:
+            settings = await load_squad_settings(uow, squad_id)
+        return (now or utcnow()) + timedelta(hours=settings.game_payment_deadline_hours)
 
     async def matches(
         self, actor: UserContext, squad_id: int, *, now: datetime | None = None
@@ -343,19 +361,37 @@ class GamePaymentService:
             )
 
     async def remind_due(self, *, now: datetime | None = None) -> int:
-        """Дедлайн оплаты прошёл: игрокам без «Оплатил» — в личку (не дошло — в группу),
-        тренеру, создавшему сбор, — итог. Один раз на сбор; отметка — до рассылки."""
+        """Срок оплаты прошёл: игрокам без «Оплатил» — в личку (не дошло — в группу). Сколько
+        раз и с каким интервалом — настройки состава, не в тихие часы. Каждое напоминание —
+        один раз; отметка — до рассылки. Итог тренеру не шлётся: он виден в опросе."""
         now = now or utcnow()
         async with self._uow_factory() as uow:
-            due = [p.id for p in await uow.game_payments.list_due(now - REMINDER_GRACE, now)]
+            due = [p.id for p in await uow.game_payments.list_due(now - REMINDER_LOOKBACK, now)]
         reminded = 0
         for payment_id in due:
             async with self._uow_factory() as uow:
                 payment = await uow.game_payments.get(payment_id)
                 match = await uow.events.get(payment.event_id) if payment else None
-                if payment is None or payment.cancelled_at is not None or match is None:
+                if (
+                    payment is None
+                    or payment.cancelled_at is not None
+                    or payment.deadline_at is None
+                    or match is None
+                ):
                     continue
-                if not await uow.system.claim_reminder(reminder_key(payment.id), "game_payment"):
+                settings = await load_squad_settings(uow, payment.squad_id)
+                number = due_payment_reminder(
+                    deadline_at=payment.deadline_at,
+                    tz=squad_tz(await uow.squads.get(payment.squad_id)),
+                    count=settings.game_payment_reminder_count,
+                    interval=timedelta(hours=settings.game_payment_reminder_interval_hours),
+                    now=now,
+                    grace=REMINDER_GRACE,
+                )
+                if number is None:
+                    continue
+                key = reminder_key(payment.id, number)
+                if not await uow.system.claim_reminder(key, "game_payment"):
                     continue
                 await uow.commit()
                 await self._remind(uow, payment, match)
@@ -388,25 +424,6 @@ class GamePaymentService:
                     details=details.text,
                 ),
             )
-        summary = ru.GAME_PAYMENT_SUMMARY.format(
-            event=_event_line(event, tz),
-            paid=len(players) - len(unpaid),
-            players=len(players),
-            unpaid=", ".join(profile(u) for u in unpaid) or "—",
-        )
-        if not players:
-            summary = ru.GAME_PAYMENT_NO_PLAYERS.format(event=_event_line(event, tz))
-        # итог — получателю денег и создавшему сбор; не дошло никому — тем, кто собирает деньги
-        ids = {i for i in (payment.collector_user_id, payment.created_by_user_id) if i}
-        delivered = [
-            await send_direct(self._notifier, u, summary)
-            for u in await uow.users.list_by_ids(sorted(ids))
-        ]
-        if not any(delivered):
-            for user in await self._recipients.with_permission(
-                uow, payment.squad_id, Permission.GAME_PAYMENTS
-            ):
-                await send_direct(self._notifier, user, summary)
         log.info("game_payment_reminded", payment_id=payment.id, unpaid=len(unpaid))
 
 

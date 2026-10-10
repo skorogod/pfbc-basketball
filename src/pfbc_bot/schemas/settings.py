@@ -4,6 +4,10 @@ from datetime import time
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# Напоминания об оплате (игры и квитанции): до 10 штук с интервалом до недели
+MAX_PAYMENT_REMINDERS = 10
+MAX_PAYMENT_REMINDER_INTERVAL_HOURS = 168
+
 
 class Features(BaseModel):
     """Feature flags — включение и отключение модулей для состава."""
@@ -16,6 +20,7 @@ class Features(BaseModel):
     birthday_staff_reminders: bool = True
     event_reminders: bool = True
     review_offers: bool = True  # после матча — тренеру предложение назначить разбор
+    receipt_reminders: bool = True  # ежемесячный опрос «прислали квитанцию тренеру?»
 
 
 class SquadSettings(BaseModel):
@@ -36,6 +41,22 @@ class SquadSettings(BaseModel):
     birthday_staff_reminder_days: list[int] = Field(default_factory=lambda: [7, 3, 1])
     event_reminder_days: list[int] = Field(default_factory=lambda: [3, 1, 0])
     event_reminder_time: time = time(9, 0)
+    # квитанции за тренировки: опрос в этот день месяца и время, срок — через столько часов
+    receipt_poll_day: int = Field(default=1, ge=1, le=28)
+    receipt_poll_time: time = time(10, 0)
+    receipt_deadline_hours: int = Field(default=24, ge=1, le=720)
+    # сбор денег за игру: срок по умолчанию (кнопка на шаге «срок» в /game_pay)
+    game_payment_deadline_hours: int = Field(default=24, ge=1, le=720)
+    # напоминания не оплатившим: первое — в срок, следующие — через интервал; 0 — не напоминать.
+    # С 00:00 до 08:00 не отправляются (переносятся на 08:00)
+    game_payment_reminder_count: int = Field(default=1, ge=0, le=MAX_PAYMENT_REMINDERS)
+    game_payment_reminder_interval_hours: int = Field(
+        default=24, ge=1, le=MAX_PAYMENT_REMINDER_INTERVAL_HOURS
+    )
+    receipt_reminder_count: int = Field(default=1, ge=0, le=MAX_PAYMENT_REMINDERS)
+    receipt_reminder_interval_hours: int = Field(
+        default=24, ge=1, le=MAX_PAYMENT_REMINDER_INTERVAL_HOURS
+    )
     features: Features = Field(default_factory=Features)
 
     @field_validator("event_reminder_days")

@@ -14,6 +14,7 @@ from pfbc_bot.services.membership import MembershipService
 from pfbc_bot.services.permissions import PermissionService, Recipients
 from pfbc_bot.services.polls import PollService
 from pfbc_bot.services.ports import Notifier
+from pfbc_bot.services.receipts import ReceiptService
 from pfbc_bot.services.registration import RegistrationService
 from pfbc_bot.services.settings import SettingsService
 from pfbc_bot.services.squads import SquadService
@@ -34,6 +35,7 @@ class Services:
     birthdays: BirthdayService
     events: EventService
     game_payments: GamePaymentService
+    receipts: ReceiptService
     permissions: PermissionService
 
 
@@ -57,5 +59,6 @@ def build_services(
         birthdays=BirthdayService(uow_factory, notifier),
         events=EventService(uow_factory, notifier, recipients),
         game_payments=GamePaymentService(uow_factory, notifier, recipients),
+        receipts=ReceiptService(uow_factory, notifier),
         permissions=PermissionService(uow_factory),
     )

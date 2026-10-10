@@ -63,6 +63,12 @@ class GamePaymentCreation(StatesGroup):
     confirm = State()
 
 
+class ReceiptRequestCreation(StatesGroup):
+    """Опрос о квитанциях за месяц вручную: срок."""
+
+    deadline = State()
+
+
 class PaymentDetailsInput(StatesGroup):
     """Реквизиты для сбора денег: способ → телефон или карта → банк."""
 

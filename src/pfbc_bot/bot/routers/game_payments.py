@@ -28,7 +28,6 @@ from pfbc_bot.schemas.squads import SquadDTO, UserContext
 from pfbc_bot.schemas.users import UserDTO
 from pfbc_bot.services.container import Services
 from pfbc_bot.services.events import format_short
-from pfbc_bot.services.game_payments import DEFAULT_DEADLINE
 from pfbc_bot.texts import ru
 
 router = Router(name="game_payments")
@@ -114,31 +113,38 @@ async def on_match(
 
 
 @router.message(GamePaymentCreation.amount, F.text)
-async def on_amount(message: Message, state: FSMContext) -> None:
+async def on_amount(
+    message: Message, ctx: UserContext, services: Services, state: FSMContext
+) -> None:
     try:
         amount = parse_amount(message.text or "")
     except ValueError as exc:
         await message.answer(str(exc))
         return
-    await _set_amount(message, state, amount)
+    await _set_amount(message, ctx, services, state, amount)
 
 
 @router.callback_query(GamePaymentCreation.amount, Choice.filter(F.flow == AMOUNT_FLOW))
-async def on_amount_suggested(callback: CallbackQuery, state: FSMContext) -> None:
+async def on_amount_suggested(
+    callback: CallbackQuery, ctx: UserContext, services: Services, state: FSMContext
+) -> None:
     await callback.answer()
     message = callback_message(callback)
     suggested = (await state.get_data()).get("suggested")
     if message is None or suggested is None:
         return
     await message.edit_reply_markup(reply_markup=None)
-    await _set_amount(message, state, Decimal(suggested))
+    await _set_amount(message, ctx, services, state, Decimal(suggested))
 
 
-async def _set_amount(message: Message, state: FSMContext, amount: Decimal) -> None:
+async def _set_amount(
+    message: Message, ctx: UserContext, services: Services, state: FSMContext, amount: Decimal
+) -> None:
     await state.update_data(amount=str(amount))
     await state.set_state(GamePaymentCreation.deadline)
-    tz = str((await state.get_data())["tz"])
-    day = format_local(utcnow() + DEFAULT_DEADLINE, tz)
+    data = await state.get_data()
+    deadline = await services.game_payments.default_deadline(ctx, int(data["squad_id"]))
+    day = format_local(deadline, str(data["tz"]))
     await message.answer(
         ru.GAME_PAYMENT_ASK_DEADLINE,
         reply_markup=choices_keyboard(
@@ -183,7 +189,10 @@ async def on_deadline_choice(
     if message is None:
         return
     await message.edit_reply_markup(reply_markup=None)
-    deadline = utcnow() + DEFAULT_DEADLINE if callback_data.value == "day" else None
+    deadline = None
+    if callback_data.value == "day":
+        squad_id = int((await state.get_data())["squad_id"])
+        deadline = await services.game_payments.default_deadline(ctx, squad_id)
     await state.update_data(deadline=deadline.isoformat() if deadline else None)
     await _ask_collector(message, ctx, services, state)
 

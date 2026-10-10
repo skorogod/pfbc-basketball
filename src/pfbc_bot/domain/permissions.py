@@ -17,6 +17,7 @@ class Permission(StrEnum):
     EVENTS = "events"
     GAME_PAYMENTS = "game_payments"  # сбор денег за игру и сводка по оплате (только тренер)
     INVITE = "invite"  # ссылка на регистрацию
+    RECEIPTS = "receipts"  # напоминание прислать тренеру квитанцию за тренировки
 
 
 PERMISSION_TITLES: dict[Permission, str] = {
@@ -28,6 +29,7 @@ PERMISSION_TITLES: dict[Permission, str] = {
     Permission.EVENTS: "Игры, турниры, разборы и прочие события",
     Permission.GAME_PAYMENTS: "Сбор денег за игру (только тренер)",
     Permission.INVITE: "Приглашение новичков (/invite)",
+    Permission.RECEIPTS: "Напоминание о квитанциях за тренировки",
 }
 
 DEFAULT_ROLE_PERMISSIONS: dict[SquadRole, frozenset[Permission]] = {
@@ -50,6 +52,7 @@ DEFAULT_ROLE_PERMISSIONS: dict[SquadRole, frozenset[Permission]] = {
             Permission.EVENTS,
             Permission.GAME_PAYMENTS,
             Permission.INVITE,
+            Permission.RECEIPTS,
         }
     ),
 }

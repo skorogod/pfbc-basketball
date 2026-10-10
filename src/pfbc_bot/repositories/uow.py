@@ -11,6 +11,7 @@ from pfbc_bot.repositories.game_payments import GamePaymentsRepository
 from pfbc_bot.repositories.matches import MatchesRepository
 from pfbc_bot.repositories.members import MembersRepository
 from pfbc_bot.repositories.polls import PollsRepository
+from pfbc_bot.repositories.receipts import ReceiptRequestsRepository
 from pfbc_bot.repositories.squads import SquadsRepository
 from pfbc_bot.repositories.system import SystemRepository
 from pfbc_bot.repositories.trainings import TrainingsRepository
@@ -25,6 +26,7 @@ class UnitOfWork:
     polls: PollsRepository
     events: EventsRepository
     game_payments: GamePaymentsRepository
+    receipts: ReceiptRequestsRepository
     matches: MatchesRepository
     system: SystemRepository
 
@@ -40,6 +42,7 @@ class UnitOfWork:
         self.polls = PollsRepository(self.session)
         self.events = EventsRepository(self.session)
         self.game_payments = GamePaymentsRepository(self.session)
+        self.receipts = ReceiptRequestsRepository(self.session)
         self.matches = MatchesRepository(self.session)
         self.system = SystemRepository(self.session)
         return self

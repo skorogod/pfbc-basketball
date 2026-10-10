@@ -98,8 +98,13 @@ def event_permission(event_type: EventType) -> Permission:
 
 
 def event_topic(event_type: EventType) -> TopicPurpose:
-    """Топик группы для поста и напоминаний: игровые события — в «Игры», остальные — в общий."""
-    return TopicPurpose.GAMES if event_type in GAME_EVENT_TYPES else TopicPurpose.GENERAL
+    """Топик группы для поста и напоминаний: игровые события — в «Игры», собрания — в
+    teambuilding, остальные — в общий (нет своего топика — тоже в общий)."""
+    if event_type in GAME_EVENT_TYPES:
+        return TopicPurpose.GAMES
+    if event_type == EventType.MEETING:
+        return TopicPurpose.TEAMBUILDING
+    return TopicPurpose.GENERAL
 
 
 class ScheduleConflictError(Conflict):

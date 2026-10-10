@@ -19,8 +19,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from pfbc_bot.bot.helpers import ask_squad, callback_message
 from pfbc_bot.bot.keyboards.common import Choice, SquadPick
+from pfbc_bot.bot.middlewares.access import to_telegram_user
 from pfbc_bot.bot.states import SettingsEdit
-from pfbc_bot.domain.enums import ROLE_TITLES, STAFF_ROLES, SquadRole, TopicPurpose
+from pfbc_bot.domain.enums import ROLE_TITLES, STAFF_ROLES, SquadRole, TopicPurpose, UserStatus
 from pfbc_bot.logging import get_logger
 from pfbc_bot.schemas.squads import SquadDTO, SquadMemberView, UserContext
 from pfbc_bot.services.container import Services
@@ -34,6 +35,8 @@ in_group = F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP})
 in_private = F.chat.type == ChatType.PRIVATE
 ROLES_FLOW, SETTINGS_SHOW_FLOW, SETTINGS_SET_FLOW = "roles", "settings_show", "settings_set"
 ADMIN_ADD_FLOW = "admin_add"
+MEMBERS_FLOW = "squad_members"
+MESSAGE_LIMIT = 4000  # лимит сообщения Telegram — 4096 символов
 
 
 class RoleAction(CallbackData, prefix="rl"):
@@ -62,6 +65,10 @@ async def cmd_bind(
         squad = await services.squads.bind_chat(
             ctx, message.chat.id, message.chat.title, command.args
         )
+        if message.from_user is not None:  # привязавший админ — участник группы и состава
+            await services.membership.on_join(
+                message.chat.id, to_telegram_user(message.from_user), discovered=True
+            )
         text = ru.BIND_DONE.format(
             chat=html.escape(message.chat.title or ""), squad=html.escape(squad.name)
         )
@@ -124,6 +131,7 @@ async def cmd_squads(message: Message, ctx: UserContext, services: Services) -> 
         await message.answer(ru.SQUADS_EMPTY)
         return
     lines = []
+    builder = InlineKeyboardBuilder()
     for item in overview:
         members = await services.squads.members(item.squad.id)
         staff = [
@@ -136,7 +144,61 @@ async def cmd_squads(message: Message, ctx: UserContext, services: Services) -> 
             f"группа: {html.escape(item.chat_title or '—')}\n"
             f"  {'; '.join(staff) or 'тренер и капитан не назначены'}" + _missing_roles(members)
         )
-    await message.answer("\n\n".join(lines))
+        builder.button(
+            text=ru.SQUAD_MEMBERS_BTN.format(squad=item.squad.name)[:60],
+            callback_data=SquadPick(flow=MEMBERS_FLOW, squad_id=item.squad.id),
+        )
+    builder.adjust(1)
+    await message.answer("\n\n".join(lines), reply_markup=builder.as_markup())
+
+
+@router.callback_query(SquadPick.filter(F.flow == MEMBERS_FLOW))
+async def on_squad_members(
+    callback: CallbackQuery, callback_data: SquadPick, ctx: UserContext, services: Services
+) -> None:
+    """Список участников состава: тренеры и капитаны первыми, затем по имени."""
+    if not await _admin_only(callback, ctx):
+        return
+    await callback.answer()
+    message = callback_message(callback)
+    if message is None:
+        return
+    squad = await services.squads.get(callback_data.squad_id)
+    members = await services.squads.members(squad.id)
+    name = html.escape(squad.name)
+    if not members:
+        await message.answer(ru.SQUAD_MEMBERS_EMPTY.format(squad=name))
+        return
+    members.sort(key=lambda m: (not m.roles & STAFF_ROLES, m.user.display_name.lower()))
+    lines = [ru.SQUAD_MEMBERS_HEADER.format(squad=name, count=len(members))]
+    lines += [
+        f"{i}. {_member_line(m, services.admins.is_admin_user(m.user))}"
+        for i, m in enumerate(members, 1)
+    ]
+    for chunk in _chunks(lines):
+        await message.answer(chunk)
+
+
+def _member_line(view: SquadMemberView, is_admin: bool) -> str:
+    marks = [_roles_text(view.roles & STAFF_ROLES)]
+    if is_admin:
+        marks.append(ru.SQUAD_MEMBER_ADMIN)
+    if view.user.status == UserStatus.UNREGISTERED:
+        marks.append(ru.SQUAD_MEMBER_UNREGISTERED)
+    extra = " · ".join(m for m in marks if m)
+    return view.user.profile_html + (f" — {extra}" if extra else "")
+
+
+def _chunks(lines: list[str]) -> list[str]:
+    """Строки в сообщения не длиннее лимита Telegram (длинный состав — несколько сообщений)."""
+    chunks: list[str] = []
+    current = ""
+    for line in lines:
+        if current and len(current) + len(line) + 1 > MESSAGE_LIMIT:
+            chunks.append(current)
+            current = ""
+        current = f"{current}\n{line}" if current else line
+    return [*chunks, current] if current else chunks
 
 
 # --- роли ---

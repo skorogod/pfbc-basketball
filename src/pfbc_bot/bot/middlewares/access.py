@@ -1,8 +1,9 @@
 """AccessMiddleware (ФТ-0): первым в цепочке проверяет членство и кладёт права в data['ctx'].
 
 Участника, вступившего в группу до подключения бота, middleware находит: по сообщению в группе
-(автор — участник) или по /start в личке (проверка через Telegram). Ответы на опросы проверяет
-PollService.
+(автор — участник) или по /start в личке (проверка через Telegram; в том числе админа — ему бот
+доступен и без членства, но в составы он попадает только как участник группы). Ответы на опросы
+проверяет PollService.
 """
 
 import time
@@ -67,9 +68,10 @@ class AccessMiddleware(BaseMiddleware):
             chat_id, user, ctx.squad_ids if ctx is not None else []
         ):
             ctx = await services.access.load_context(user)
-        # пользователь мог вступить в группу до подключения бота — проверяем через Telegram
+        # пользователь мог вступить в группу до подключения бота — проверяем через Telegram.
+        # Админу доступ открыт и без членства, но участником состава он становится только так
         if (
-            (ctx is None or not ctx.is_allowed)
+            (ctx is None or not ctx.is_member)
             and _is_private_start(event)
             and await services.membership.verify_via_telegram(user)
         ):

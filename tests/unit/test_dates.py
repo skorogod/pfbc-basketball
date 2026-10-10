@@ -5,10 +5,12 @@ import pytest
 from pfbc_bot.domain.dates import (
     birthday_offsets,
     dates_for_weekday,
+    due_payment_reminder,
     due_reminder_offsets,
     duty_assign_at,
     is_birthday,
     local_to_utc,
+    outside_quiet_hours,
     overlaps,
     parse_date,
     parse_local_datetime,
@@ -232,3 +234,37 @@ def test_review_default_at_first_training_of_week() -> None:
         next_mon, time(18, 0), MSK
     )
     assert review_default_at([], tz=MSK, now=tuesday, lead=lead) is None
+
+
+def test_quiet_hours_shift_to_eight() -> None:
+    def msk(hour: int, minute: int = 0) -> datetime:
+        return local_to_utc(date(2026, 11, 2), time(hour, minute), MSK)
+
+    assert outside_quiet_hours(msk(0), MSK) == msk(8)
+    assert outside_quiet_hours(msk(7, 59), MSK) == msk(8)
+    assert outside_quiet_hours(msk(8), MSK) == msk(8)
+    assert outside_quiet_hours(msk(23, 59), MSK) == msk(23, 59)
+
+
+def test_due_payment_reminder() -> None:
+    deadline = local_to_utc(date(2026, 11, 2), time(18, 0), MSK)
+
+    def due(now: datetime, count: int = 3) -> int | None:
+        return due_payment_reminder(
+            deadline_at=deadline,
+            tz=MSK,
+            count=count,
+            interval=timedelta(hours=12),
+            now=now,
+            grace=timedelta(days=2),
+        )
+
+    assert due(deadline - timedelta(minutes=1)) is None
+    assert due(deadline) == 0
+    # второе — 03.11 06:00, тихие часы → 08:00
+    assert due(local_to_utc(date(2026, 11, 3), time(7, 0), MSK)) == 0
+    assert due(local_to_utc(date(2026, 11, 3), time(8, 0), MSK)) == 1
+    assert due(local_to_utc(date(2026, 11, 3), time(18, 0), MSK)) == 2
+    assert due(deadline, count=0) is None
+    # последнее пропущено больше чем на grace — не догоняем
+    assert due(local_to_utc(date(2026, 11, 6), time(18, 0), MSK)) is None

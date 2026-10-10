@@ -101,8 +101,46 @@ async def test_payment_post_poll_and_reminders(
     assert "Напоминание об оплате" in notifier.to(2)[-1].text
     assert "+7 999 123-45-67" in notifier.to(2)[-1].text
     assert not notifier.to(1) and not notifier.to(3) and not notifier.to(4)
-    summary = notifier.to(COACH)[-1].text
-    assert "Оплатили: 1 из 2" in summary and "user2" in summary
+    # итог тренеру не шлётся — он виден в опросе
+    assert not any("Напоминание" in m.text or "Оплатили" in m.text for m in notifier.to(COACH))
+
+
+async def test_repeated_reminders_skip_quiet_hours(
+    services: Services, notifier: FakeNotifier, match_id: int
+) -> None:
+    """3 напоминания раз в 6 часов: срок 12.10 20:00 → 20:00, 02:00 → 08:00 (тихие часы),
+    08:00; оплативший после первого больше не получает."""
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    squad_id = (await services.events.get(match_id)).squad_id
+    await services.settings.set_squad_value(admin, squad_id, "game_payment_reminder_count", "3")
+    await services.settings.set_squad_value(
+        admin, squad_id, "game_payment_reminder_interval_hours", "6"
+    )
+    coach = await ctx_of(services, COACH)
+    await services.game_payments.create(coach, payment(match_id, at(20), coach.user.id), now=NOW)
+
+    assert await services.game_payments.remind_due(now=at(20)) == 1
+    assert len(notifier.to(1)) == len(notifier.to(2)) == 1
+    await services.polls.record_answer("poll-2", 1, [PAID], now=at(21))
+
+    next_day = DAY + timedelta(days=1)
+    assert await services.game_payments.remind_due(now=at(2, next_day)) == 0  # тихие часы
+    assert await services.game_payments.remind_due(now=at(7, next_day)) == 0
+    # второе (02:00) и третье (08:00) совпали после сдвига — уходит одно, последнее
+    assert await services.game_payments.remind_due(now=at(8, next_day)) == 1
+    assert await services.game_payments.remind_due(now=at(9, next_day)) == 0
+    assert len(notifier.to(1)) == 1 and len(notifier.to(2)) == 2
+
+
+async def test_no_reminders_when_count_is_zero(
+    services: Services, notifier: FakeNotifier, match_id: int
+) -> None:
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    squad_id = (await services.events.get(match_id)).squad_id
+    await services.settings.set_squad_value(admin, squad_id, "game_payment_reminder_count", "0")
+    coach = await ctx_of(services, COACH)
+    await services.game_payments.create(coach, payment(match_id, at(20), coach.user.id), now=NOW)
+    assert await services.game_payments.remind_due(now=at(20)) == 0
 
 
 async def test_reminder_in_group_when_dm_closed(
@@ -184,9 +222,27 @@ async def test_admin_collects_for_coach(
     assert await services.game_payments.saved_details(coach.user.id) == DETAILS
     assert await services.game_payments.saved_details(admin.user.id) is None
 
+    # после срока итог получателю и создателю не шлётся — он виден в опросе
     await services.game_payments.remind_due(now=NOW + timedelta(hours=3))
-    assert "Срок оплаты прошёл" in notifier.to(COACH)[-1].text
-    assert "Срок оплаты прошёл" in notifier.to(ADMIN_TG_ID)[-1].text
+    assert not any("Срок оплаты прошёл" in m.text for m in notifier.to(COACH))
+    assert not any("Срок оплаты прошёл" in m.text for m in notifier.to(ADMIN_TG_ID))
 
     with pytest.raises(Conflict):  # игрок без роли тренера/админа — не получатель
         await services.game_payments.collector(admin, squad_id, 10_000)
+
+
+async def test_default_deadline_is_configurable(services: Services, match_id: int) -> None:
+    coach = await ctx_of(services, COACH)
+    squad_id = (await services.events.get(match_id)).squad_id
+    assert await services.game_payments.default_deadline(coach, squad_id, now=NOW) == (
+        NOW + timedelta(days=1)
+    )
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    await services.settings.set_squad_value(admin, squad_id, "game_payment_deadline_hours", "48")
+    assert await services.game_payments.default_deadline(coach, squad_id, now=NOW) == (
+        NOW + timedelta(hours=48)
+    )
+    with pytest.raises(PermissionDenied):  # срок по умолчанию — тому, кто собирает деньги
+        await services.game_payments.default_deadline(
+            await ctx_of(services, CAPTAIN), squad_id, now=NOW
+        )

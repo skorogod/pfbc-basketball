@@ -215,6 +215,17 @@ async def test_roles_invite_and_settings_in_private_chat(
     )
     assert (await ctx_of(services, COACH)).has_role(squad.id, SquadRole.COACH)
 
+    # /squads → «Участники»: список состава с ролями; не админу кнопка не отвечает
+    await harness.private(ADMIN_TG_ID, "/squads")
+    members_btn = SquadPick(flow="squad_members", squad_id=squad.id).pack()
+    await harness.press(ADMIN_TG_ID, members_btn)
+    listing = harness.session.texts_to(ADMIN_TG_ID)[-1]
+    assert listing.startswith("<b>Участники состава Взрослые</b> — 3:")
+    assert "\n1. " in listing and "user100</a> — тренер · ⚠️ не зарегистрирован(а)" in listing
+    assert "user999</a> — админ" in listing and "user2</a> — ⚠️" in listing
+    await harness.press(PLAYER, members_btn)
+    assert harness.session.texts_to(PLAYER) == []
+
     # /admins: обычный участник не видит список; админ назначает тренера вторым админом
     await harness.private(PLAYER, "/admins")
     assert harness.session.texts_to(PLAYER)[-1] == ru.NO_PERMISSION
@@ -431,6 +442,24 @@ async def test_group_message_discovers_member_who_joined_before_bot(
         )
     )
     assert await services.access.load_context(to_telegram_user(_user(6))) is None
+
+
+async def test_admin_becomes_member_by_bind_or_start(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """Админу бот доступен и без членства, но в состав он попадает как участник группы."""
+    await bind(harness)  # привязавший группу админ — её участник
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    assert admin.is_admin and admin.is_member
+
+    # админ вышел и вернулся, пока бот этого не видел: в группе не писал — находится по /start
+    await harness.member(ADMIN_TG_ID, joined=False)
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    assert admin.is_admin and not admin.is_member
+    notifier.chat_members[GROUP_ID] = {ADMIN_TG_ID}
+    await harness.private(ADMIN_TG_ID, "/start")
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    assert admin.is_admin and admin.is_member
 
 
 async def test_review_with_default_time_and_tournament_links(
@@ -824,3 +853,30 @@ async def test_command_menu_follows_permissions(
     requests = len(harness.session.requests)
     await harness.private(player_tg, "/help")  # меню не менялось — повторно не ставится
     assert not any(isinstance(r, SetMyCommands) for r in harness.session.requests[requests:])
+
+
+async def test_receipts_command_publishes_once_a_month(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """/receipts: срок по умолчанию → пост и опрос «Отправил»; повторно — только статус."""
+    await bind(harness)
+    for tg_id in (COACH, PLAYER):
+        await harness.member(tg_id, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach = await ctx_of(services, COACH)
+    await services.squads.set_role(admin, squad.id, coach.user.id, SquadRole.COACH, grant=True)
+
+    await harness.private(PLAYER, "/receipts")  # игроку по умолчанию недоступно
+    assert harness.session.texts_to(PLAYER)[-1] == ru.NO_SQUADS_FOR_ACTION
+
+    await harness.private(COACH, "/receipts")
+    assert harness.session.texts_to(COACH)[-1] == ru.RECEIPT_ASK_DEADLINE
+    await harness.press(COACH, Choice(flow="rc_deadline", value="default").pack())
+    assert "опубликован в группе" in harness.session.texts_to(COACH)[-1]
+    assert notifier.polls[-1][1].endswith("отправили тренеру?")
+
+    await harness.private(COACH, "/receipts")
+    assert "уже опубликован" in harness.session.texts_to(COACH)[-1]
+    assert len(notifier.polls) == 1

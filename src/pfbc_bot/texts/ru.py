@@ -106,6 +106,7 @@ HELP_BY_PERMISSION: dict[str, str] = {
     ),
     "game_payments": "/game_pay — сбор денег за игру: сумма, получатель, опрос «Оплатил»",
     "invite": "/invite — ссылка на регистрацию для новичка",
+    "receipts": "/receipts — опрос «Прислали квитанцию за тренировки тренеру?» за месяц",
 }
 HELP_ADMIN = (
     "\n\n<b>Админ</b>\n"
@@ -160,6 +161,11 @@ SETTINGS_GLOBAL = "🌐 Глобальные"
 SETTINGS_UNKNOWN = "Неизвестная настройка: {key}. Список ключей: /settings"
 SETTINGS_SAVED = "✅ Настройка {key} = {value} сохранена ({scope})."
 SQUAD_MISSING_ROLES = "\n  ⚠️ Не назначен: {roles} — их сообщения получают админы (/roles)."
+SQUAD_MEMBERS_BTN = "👥 Участники: {squad}"
+SQUAD_MEMBERS_HEADER = "<b>Участники состава {squad}</b> — {count}:"
+SQUAD_MEMBERS_EMPTY = "В составе <b>{squad}</b> пока нет участников."
+SQUAD_MEMBER_ADMIN = "админ"
+SQUAD_MEMBER_UNREGISTERED = "⚠️ не зарегистрирован(а)"
 SQUADS_EMPTY = (
     "Составов пока нет. Добавьте бота в группу состава и выполните там /bind &lt;название&gt;."
 )
@@ -447,6 +453,39 @@ BTN_CANCEL = "Отмена"
 INPUT_CANCELLED = "Ввод прерван."
 PAST_DATE = "Дата уже прошла."
 
+# --- квитанции об оплате тренировок за месяц ---
+MONTHS = (
+    "январь", "февраль", "март", "апрель", "май", "июнь",
+    "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+)  # fmt: skip
+RECEIPT_POST = (
+    "🧾 <b>Квитанция об оплате тренировок за {month}</b>\n"
+    "Пришлите квитанцию (фото или PDF) тренеру{coaches} в личные сообщения и отметьтесь "
+    "в опросе ниже.\n⏰ До {deadline}"
+)
+RECEIPT_COACHES = ": {names}"
+RECEIPT_POLL_QUESTION = "🧾 Квитанция за {month}: отправили тренеру?"
+RECEIPT_REMINDER_DM = (
+    "⏰ <b>Напоминание: квитанция за {month}</b> ({squad})\n"
+    "Пришлите тренеру{coaches} квитанцию об оплате тренировок. Если уже отправили — "
+    "отметьте «Отправил» в опросе в группе."
+)
+RECEIPT_REMINDER_GROUP = (
+    "⏰ {names}, напоминание: пришлите тренеру квитанцию об оплате тренировок за {month} "
+    "и отметьтесь в опросе."
+)
+RECEIPT_ALREADY = (
+    "Опрос о квитанциях за {month} уже опубликован {when}. Повторно в этом месяце "
+    "бот его не публикует.\nОтметили «Отправил»: {sent} из {total}\nНе отметили: {missing}"
+)
+RECEIPT_ASK_DEADLINE = (
+    "До какого времени прислать квитанцию? Кнопка — срок по умолчанию, или введите "
+    "<code>дд.мм.гггг чч:мм</code>. После срока бот напомнит тем, кто не отметил «Отправил»."
+)
+RECEIPT_BTN_DEFAULT = "⏰ До {when}"
+RECEIPT_CREATED = "✅ Опрос о квитанциях за {month} опубликован в группе."
+RECEIPT_NOT_SENT = "Не удалось опубликовать опрос в группе — проверьте, что бот может там писать."
+
 # --- сбор денег за игру (не путать с оплатой тренировок по квитанциям) ---
 GAME_PAYMENT_EVENT = "{type}: <b>{title}</b>, {when}{tournament}"
 GAME_PAYMENT_POST = (
@@ -465,14 +504,6 @@ GAME_PAYMENT_REMINDER_GROUP = (
     "💰 {names}, напоминание об оплате игры\n{event}\n<b>Сумма: {amount}</b>\n{details}\n"
     "После перевода отметьте «Оплатил» в опросе."
 )
-GAME_PAYMENT_SUMMARY = (
-    "💰 Срок оплаты прошёл\n{event}\nОплатили: {paid} из {players}.\n"
-    "Не отметили оплату (им отправлено напоминание): {unpaid}"
-)
-GAME_PAYMENT_NO_PLAYERS = (
-    "💰 Срок оплаты прошёл\n{event}\nВ опросе участия никто не ответил «Буду (игрок)» — "
-    "напоминать некому."
-)
 GAME_PAYMENT_STATUS = (
     "\n\n💰 <b>Оплата: {amount}</b>{deadline}{collector}\nОплатили ({paid_count}): {paid}\n"
     "Не оплатили ({unpaid_count}): {unpaid}{others}"
@@ -483,10 +514,10 @@ GAME_PAYMENT_NO_MATCHES = "Нет матчей для сбора денег. С�
 GAME_PAYMENT_ASK_AMOUNT = "Сумма с каждого игрока в рублях, например <code>2500</code>:"
 GAME_PAYMENT_BTN_SUGGESTED = "{amount} — {price} ÷ {players} игр."
 GAME_PAYMENT_ASK_DEADLINE = (
-    "До какого времени оплатить? Кнопка — сутки, или введите <code>дд.мм.гггг чч:мм</code>. "
-    "После срока бот напомнит тем, кто не отметил оплату."
+    "До какого времени оплатить? Кнопка — срок по умолчанию, или введите "
+    "<code>дд.мм.гггг чч:мм</code>. После срока бот напомнит тем, кто не отметил оплату."
 )
-GAME_PAYMENT_BTN_DAY = "⏰ Сутки — до {when}"
+GAME_PAYMENT_BTN_DAY = "⏰ До {when}"
 GAME_PAYMENT_BTN_NO_DEADLINE = "Без срока"
 GAME_PAYMENT_ASK_COLLECTOR = "Кто собирает деньги? Переводить будут на его реквизиты."
 GAME_PAYMENT_ME = " (я)"

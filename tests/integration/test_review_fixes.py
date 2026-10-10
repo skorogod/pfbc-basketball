@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import text
 
 from pfbc_bot.domain.dates import local_to_utc
-from pfbc_bot.domain.enums import EventType, PollType, SquadRole
+from pfbc_bot.domain.enums import EventType, PollType, SquadRole, TopicPurpose
 from pfbc_bot.repositories.uow import UowFactory
 from pfbc_bot.schemas.events import EventCreate
 from pfbc_bot.schemas.payments import GamePaymentCreate, PaymentDetails, PaymentMethod
@@ -16,7 +16,7 @@ from pfbc_bot.schemas.trainings import TrainingCreate
 from pfbc_bot.services.container import Services
 from pfbc_bot.services.errors import Conflict, PermissionDenied
 
-from .conftest import FakeNotifier
+from .conftest import ADMIN_TG_ID, FakeNotifier
 from .helpers import CHAT_ID, GAMES_THREAD, ctx_of, join, setup_squad
 
 MSK = "Europe/Moscow"
@@ -96,6 +96,28 @@ async def test_publication_result_is_reported(
         now=NOW,
     )
     assert meeting.posted is True and meeting.poll_posted is None  # у собрания опроса нет
+
+
+async def test_meeting_goes_to_teambuilding_topic(
+    services: Services, squad_id: int, notifier: FakeNotifier
+) -> None:
+    coach = await ctx_of(services, COACH)
+
+    async def publish(type_: EventType, hour: int) -> int | None:
+        await services.events.create(
+            coach,
+            EventCreate(
+                squad_id=squad_id, type=type_, title="x", starts_at=at(hour), notify_group=True
+            ),
+            now=NOW,
+        )
+        return notifier.to(CHAT_ID)[-1].thread_id
+
+    assert await publish(EventType.MEETING, 10) is None  # топик не назначен — в общий раздел
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    await services.squads.bind_topic(admin, CHAT_ID, TopicPurpose.TEAMBUILDING, 13)
+    assert await publish(EventType.MEETING, 12) == 13
+    assert await publish(EventType.OTHER, 14) is None  # прочие события — по-прежнему в общий
 
 
 async def test_game_payment_poll_failure_removes_post(

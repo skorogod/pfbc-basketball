@@ -44,6 +44,8 @@ def build_jobs(services: Services, timezone: str) -> list[Job]:
         Job("event_reminders", services.events.send_due_reminders, every(minutes=5)),
         Job("review_offers", services.events.offer_reviews, every(minutes=5)),
         Job("game_payment_reminders", services.game_payments.remind_due, every(minutes=5)),
+        Job("receipt_polls", services.receipts.publish_due, every(minutes=5)),
+        Job("receipt_reminders", services.receipts.remind_due, every(minutes=5)),
         Job(
             "reconcile_memberships",
             services.membership.reconcile,

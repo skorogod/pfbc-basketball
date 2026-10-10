@@ -40,6 +40,7 @@ COMMANDS_BY_PERMISSION: dict[Permission, list[BotCommand]] = {
     ],
     Permission.GAME_PAYMENTS: [BotCommand(command="game_pay", description="Сбор денег за игру")],
     Permission.INVITE: [BotCommand(command="invite", description="Ссылка для новичка")],
+    Permission.RECEIPTS: [BotCommand(command="receipts", description="Квитанции за тренировки")],
 }
 
 ADMIN_COMMANDS = [

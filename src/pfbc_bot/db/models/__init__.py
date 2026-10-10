@@ -8,6 +8,7 @@ from pfbc_bot.db.models.payments import (
     PaymentPeriod,
     PaymentReceipt,
     PaymentReminderConfig,
+    ReceiptRequest,
 )
 from pfbc_bot.db.models.polls import Poll, PollAnswer
 from pfbc_bot.db.models.squads import (
@@ -34,6 +35,7 @@ __all__ = [
     "PaymentReminderConfig",
     "Poll",
     "PollAnswer",
+    "ReceiptRequest",
     "ReminderLog",
     "SettingsEntry",
     "Squad",

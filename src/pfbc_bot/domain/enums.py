@@ -31,6 +31,7 @@ class TopicPurpose(StrEnum):
     GAMES = "games"
     GREETINGS = "greetings"
     PAYMENTS = "payments"
+    TEAMBUILDING = "teambuilding"  # собрания команды
 
 
 class TrainingStatus(StrEnum):
@@ -60,6 +61,7 @@ class PollType(StrEnum):
     REVIEW = "review"
     TOURNAMENT = "tournament"
     GAME_PAYMENT = "game_payment"  # «Оплатил» — сбор денег за игру
+    RECEIPT = "receipt"  # «Отправил» — квитанция за тренировки за месяц
     CUSTOM = "custom"
 
 
@@ -135,3 +137,6 @@ MATCH_POLL_OPTIONS: tuple[str, ...] = (
 GAME_PAYMENT_PAID = "Оплатил"
 GAME_PAYMENT_POLL_OPTIONS: tuple[str, ...] = (GAME_PAYMENT_PAID, "Оплачу позже")
 TOURNAMENT_POLL_OPTIONS: tuple[str, ...] = ("Участвую", "Не смогу")
+# Квитанция об оплате тренировок за месяц — тренеру. Второй вариант — как у сбора за игру.
+RECEIPT_SENT = "Отправил"
+RECEIPT_POLL_OPTIONS: tuple[str, ...] = (RECEIPT_SENT, "Отправлю позже")

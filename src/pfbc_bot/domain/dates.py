@@ -186,6 +186,44 @@ def due_reminder_offsets(
     return due
 
 
+# Тихие часы: напоминания об оплате с 00:00 до 08:00 (по времени состава) не отправляются —
+# переносятся на 08:00.
+QUIET_FROM, QUIET_UNTIL = time(0, 0), time(8, 0)
+
+
+def outside_quiet_hours(moment: datetime, tz: str) -> datetime:
+    """Момент в тихие часы сдвигается на их конец (08:00 того же дня)."""
+    local = to_local(moment, tz)
+    if QUIET_FROM <= local.time() < QUIET_UNTIL:
+        return local_to_utc(local.date(), QUIET_UNTIL, tz)
+    return moment
+
+
+def due_payment_reminder(
+    *,
+    deadline_at: datetime,
+    tz: str,
+    count: int,
+    interval: timedelta,
+    now: datetime,
+    grace: timedelta,
+) -> int | None:
+    """Номер напоминания (0, 1, …), которое пора отправить сейчас, или None.
+
+    Напоминание k — в срок + k × interval, со сдвигом из тихих часов. Берётся последнее
+    наступившее: пропущенные раньше (бот был выключен) не догоняются, как и те, что старше grace.
+    """
+    last = None
+    for k in range(count):
+        fire_at = outside_quiet_hours(deadline_at + k * interval, tz)
+        if fire_at > now:
+            break
+        last = (k, fire_at)
+    if last is None or now >= last[1] + grace:
+        return None
+    return last[0]
+
+
 def is_early_training(
     *, starts_at: datetime, tz: str, poll_time: time, duty_lead: timedelta, early_until: time
 ) -> bool:

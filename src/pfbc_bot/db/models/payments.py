@@ -78,3 +78,19 @@ class GamePayment(IdMixin, CreatedAtMixin, Base):
     )
     # заменён новым сбором по той же игре или игра удалена — напоминаний нет
     cancelled_at: Mapped[datetime | None]
+
+
+class ReceiptRequest(IdMixin, CreatedAtMixin, Base):
+    """Опрос «прислали квитанцию за тренировки тренеру?» за месяц: по расписанию или вручную.
+    После срока бот напоминает тем, кто не отметил «Отправил». Один на состав в месяц."""
+
+    __tablename__ = "receipt_requests"
+    __table_args__ = (UniqueConstraint("squad_id", "month"),)
+
+    squad_id: Mapped[int] = mapped_column(ForeignKey("squads.id", ondelete="CASCADE"), index=True)
+    month: Mapped[date]  # первое число месяца (по часовому поясу состава)
+    deadline_at: Mapped[datetime]
+    # None — опубликован по расписанию
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )

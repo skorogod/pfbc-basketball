@@ -19,6 +19,7 @@ from pfbc_bot.bot.routers import (
     permissions,
     polls,
     profile,
+    receipts,
     registration,
     trainings,
 )
@@ -56,6 +57,7 @@ def create_dispatcher(
         trainings.router,
         events.router,
         game_payments.router,
+        receipts.router,
     )
     return dp
 
