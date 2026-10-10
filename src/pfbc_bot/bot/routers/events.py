@@ -13,7 +13,13 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from pfbc_bot import callbacks
-from pfbc_bot.bot.helpers import ask_squad, available_squads, callback_message, dismiss
+from pfbc_bot.bot.helpers import (
+    ask_squad,
+    available_squads,
+    callback_message,
+    dismiss,
+    picked_squad,
+)
 from pfbc_bot.bot.keyboards.common import (
     Choice,
     ItemAction,
@@ -209,9 +215,10 @@ async def on_squad_picked(
     services: Services,
     state: FSMContext,
 ) -> None:
+    permissions = (Permission.EVENTS,) if callback_data.flow == REVIEW_ADD else EVENT_PERMISSIONS
+    squad = await picked_squad(ctx, services, callback_data.squad_id, *permissions)
     await callback.answer()
     if message := callback_message(callback):
-        squad = await services.squads.get(callback_data.squad_id)
         if callback_data.flow == REVIEW_ADD:
             await _start_review(message, squad, state)
         else:

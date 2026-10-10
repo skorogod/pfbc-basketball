@@ -7,6 +7,7 @@ from pfbc_bot.bot.keyboards.common import squads_keyboard
 from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.schemas.squads import SquadDTO, UserContext
 from pfbc_bot.services.container import Services
+from pfbc_bot.services.errors import PermissionDenied
 from pfbc_bot.texts import ru
 
 
@@ -21,6 +22,16 @@ async def available_squads(
         sid for sid in ctx.squad_ids if not permissions or any(ctx.can(sid, p) for p in permissions)
     ]
     return await services.squads.get_many(squad_ids)
+
+
+async def picked_squad(
+    ctx: UserContext, services: Services, squad_id: int, *permissions: Permission
+) -> SquadDTO:
+    """Состав, выбранный кнопкой. Данные кнопки можно подделать, поэтому право (хотя бы одно
+    из permissions) проверяется заново — как при показе списка в ask_squad."""
+    if not any(ctx.can(squad_id, p) for p in permissions):
+        raise PermissionDenied(ru.NO_PERMISSION)
+    return await services.squads.get(squad_id)
 
 
 async def ask_squad(

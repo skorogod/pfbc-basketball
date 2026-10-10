@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from pfbc_bot.bot.helpers import ask_squad, callback_message, dismiss
+from pfbc_bot.bot.helpers import ask_squad, callback_message, dismiss, picked_squad
 from pfbc_bot.bot.keyboards.common import ItemAction, SquadPick, confirm_markup
 from pfbc_bot.bot.states import ScheduleEdit, TrainingEdit
 from pfbc_bot.domain.dates import (
@@ -70,17 +70,31 @@ async def cmd_attendance(message: Message, ctx: UserContext, services: Services)
         await show_attendance_choice(message, squad, services)
 
 
-@router.callback_query(
-    SquadPick.filter(F.flow.in_({SCHEDULE, TRAININGS, TRAINING_ADD, POLL, ATTENDANCE}))
-)
+# право, с которым показывался выбор состава, — по нему же проверяется нажатие
+FLOW_PERMISSIONS: dict[str, Permission] = {
+    SCHEDULE: Permission.SCHEDULE,
+    TRAININGS: Permission.SCHEDULE,
+    TRAINING_ADD: Permission.SCHEDULE,
+    POLL: Permission.TRAINING_POLL,
+    ATTENDANCE: Permission.ATTENDANCE,
+}
+
+
+@router.callback_query(SquadPick.filter(F.flow.in_(FLOW_PERMISSIONS)))
 async def on_squad_picked(
-    callback: CallbackQuery, callback_data: SquadPick, services: Services, state: FSMContext
+    callback: CallbackQuery,
+    callback_data: SquadPick,
+    ctx: UserContext,
+    services: Services,
+    state: FSMContext,
 ) -> None:
+    squad = await picked_squad(
+        ctx, services, callback_data.squad_id, FLOW_PERMISSIONS[callback_data.flow]
+    )
     await callback.answer()
     message = callback_message(callback)
     if message is None:
         return
-    squad = await services.squads.get(callback_data.squad_id)
     handlers = {
         SCHEDULE: lambda: show_schedule(message, squad, services),
         TRAININGS: lambda: show_trainings(message, squad, services),

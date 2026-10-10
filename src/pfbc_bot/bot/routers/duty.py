@@ -10,7 +10,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from pfbc_bot import callbacks
-from pfbc_bot.bot.helpers import ask_squad, callback_message, dismiss
+from pfbc_bot.bot.helpers import ask_squad, callback_message, dismiss, picked_squad
 from pfbc_bot.bot.keyboards.common import SquadPick
 from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.integrations.telegram.notifier import to_markup
@@ -33,9 +33,9 @@ async def cmd_duty(message: Message, ctx: UserContext, services: Services) -> No
 async def on_duty_squad(
     callback: CallbackQuery, callback_data: SquadPick, ctx: UserContext, services: Services
 ) -> None:
+    squad = await picked_squad(ctx, services, callback_data.squad_id, Permission.DUTY)
     await callback.answer()
     if message := callback_message(callback):
-        squad = await services.squads.get(callback_data.squad_id)
         await _show_duties(message, squad, ctx, services)
 
 

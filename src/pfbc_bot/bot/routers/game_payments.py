@@ -17,7 +17,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from pfbc_bot.bot.helpers import ask_squad, callback_message, dismiss
+from pfbc_bot.bot.helpers import ask_squad, callback_message, dismiss, picked_squad
 from pfbc_bot.bot.keyboards.common import (
     Choice,
     ItemAction,
@@ -57,9 +57,9 @@ async def cmd_game_pay(message: Message, ctx: UserContext, services: Services) -
 async def on_squad(
     callback: CallbackQuery, callback_data: SquadPick, ctx: UserContext, services: Services
 ) -> None:
+    squad = await picked_squad(ctx, services, callback_data.squad_id, Permission.GAME_PAYMENTS)
     await callback.answer()
     if message := callback_message(callback):
-        squad = await services.squads.get(callback_data.squad_id)
         await _choose_match(message, squad, ctx, services)
 
 

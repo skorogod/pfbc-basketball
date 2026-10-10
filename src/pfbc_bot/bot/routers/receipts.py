@@ -13,7 +13,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from pfbc_bot.bot.helpers import ask_squad, callback_message
+from pfbc_bot.bot.helpers import ask_squad, callback_message, picked_squad
 from pfbc_bot.bot.keyboards.common import (
     Choice,
     ItemAction,
@@ -50,9 +50,9 @@ async def on_squad(
     services: Services,
     state: FSMContext,
 ) -> None:
+    squad = await picked_squad(ctx, services, callback_data.squad_id, Permission.RECEIPTS)
     await callback.answer()
     if message := callback_message(callback):
-        squad = await services.squads.get(callback_data.squad_id)
         await _start(message, squad, ctx, services, state)
 
 

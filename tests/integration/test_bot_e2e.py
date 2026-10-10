@@ -13,6 +13,7 @@ import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.fsm.storage.base import StorageKey
 from aiogram.methods import (
     AnswerCallbackQuery,
     DeleteMessage,
@@ -779,9 +780,18 @@ async def test_forged_buttons_are_refused(
         SquadPick(flow="settings_show", squad_id=squad.id).pack(),
         Choice(flow="settings_show", value="global").pack(),
         RoleAction(squad_id=squad.id, user_id=1, action="open").pack(),
+        # выбор состава в сценариях тренера и капитана — у игрока этих прав нет
+        *(
+            SquadPick(flow=flow, squad_id=squad.id).pack()
+            for flow in ("schedule", "trainings", "tr_add", "poll", "ev_add", "ev_review", "duty")
+        ),
+        *(SquadPick(flow=flow, squad_id=squad.id).pack() for flow in ("gp", "rc")),
     ):
         await harness.press(PLAYER, data)
     assert set(harness.session.texts_to(PLAYER)[sent_before:]) <= {ru.NO_PERMISSION}
+    # и ни один диалог (добавление тренировки, события) не начался
+    key = StorageKey(bot_id=harness.bot.id, chat_id=PLAYER, user_id=PLAYER)
+    assert await harness.dp.storage.get_state(key) is None
 
 
 async def test_payment_block_only_for_coach(
