@@ -1,7 +1,7 @@
 """Ожидаемые ошибки бизнес-логики показываются пользователю, остальные — логируются."""
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import ExceptionTypeFilter
 from aiogram.types import CallbackQuery, ErrorEvent, Message
 
@@ -20,7 +20,14 @@ async def domain_error_message(event: ErrorEvent, message: Message) -> None:
 
 @router.error(ExceptionTypeFilter(DomainError), F.update.callback_query.as_("callback"))
 async def domain_error_callback(event: ErrorEvent, callback: CallbackQuery) -> None:
-    await callback.answer(str(event.exception), show_alert=True)
+    """Всплывающее окно. Но на нажатие Telegram принимает один ответ: если обработчик уже
+    ответил (чтобы кнопка не «крутилась»), — текст приходит в личку обычным сообщением."""
+    text = str(event.exception)
+    try:
+        await callback.answer(text, show_alert=True)
+    except TelegramBadRequest:
+        if callback.bot is not None:
+            await callback.bot.send_message(callback.from_user.id, text)
 
 
 @router.error()

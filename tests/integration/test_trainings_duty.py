@@ -454,11 +454,13 @@ async def test_duty_waits_for_poll(
     services: Services, uow_factory: UowFactory, team: dict[str, int]
 ) -> None:
     """Опроса ещё нет — дежурные не назначаются «никем», а ждут его."""
+    training_id = (await services.trainings.upcoming(team["squad_id"], now=at(9)))[0].id
     assert await services.duty.assign_due(now=at(16)) == 0
+    assert await services.polls.trainings_with_polls([training_id]) == set()
     await services.polls.publish_training_polls(now=at(16, 1))
+    assert await services.polls.trainings_with_polls([training_id]) == {training_id}
     await services.polls.record_answer("poll-1", 1, [YES], now=at(16, 2))
     assert await services.duty.assign_due(now=at(16, 3)) == 1
-    training_id = (await services.trainings.upcoming(team["squad_id"], now=at(9)))[0].id
     assert await _active_duty(uow_factory, training_id) == {team["u1"]}
 
 

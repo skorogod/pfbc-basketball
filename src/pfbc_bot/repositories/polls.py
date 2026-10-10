@@ -32,6 +32,20 @@ class PollsRepository:
         )
         return (await self._session.scalars(stmt)).first()
 
+    async def refs_with_polls(
+        self, poll_type: PollType, ref_type: str, ref_ids: list[int]
+    ) -> set[int]:
+        """Из ref_ids — те, у которых есть действующий опрос."""
+        if not ref_ids:
+            return set()
+        stmt = select(Poll.ref_id).where(
+            Poll.type == poll_type,
+            Poll.ref_type == ref_type,
+            Poll.ref_id.in_(ref_ids),
+            Poll.superseded_at.is_(None),
+        )
+        return {ref_id for ref_id in await self._session.scalars(stmt) if ref_id is not None}
+
     async def list_to_close(self, now: datetime) -> list[Poll]:
         """Действующие опросы, срок голосования которых прошёл."""
         stmt = select(Poll).where(

@@ -399,6 +399,7 @@ TOURNAMENT_BAD_LENGTH = "Число дней — от 1 до 366, или кно�
 EVENT_ATTENDANCE = "<b>{type}: {title}</b>, {when}\n{lines}\nНе ответили: {missing}"
 EVENT_NO_POLL = "Опрос по этому событию не публиковался."
 CHOOSE_TRAINING_OR_EVENT = "Чью сводку ответов показать?"
+ATTENDANCE_NO_POLL_MARK = " · опроса ещё нет"
 ATTENDANCE_TRAININGS = "🏀 <b>Тренировки</b> — чью сводку показать?"
 ATTENDANCE_EVENTS = "📅 <b>Игры и события</b> — чью сводку показать?"
 EVENT_SUMMARY = "Проверьте: <b>{type}: {title}</b>\n🕒 {when}"

@@ -214,6 +214,11 @@ class PollService:
             log.info("poll_closed_in_telegram", poll_id=poll.id, type=poll.type)
             return True
 
+    async def trainings_with_polls(self, training_ids: list[int]) -> set[int]:
+        """Тренировки, по которым опрос уже опубликован (для списка в /attendance)."""
+        async with self._uow_factory() as uow:
+            return await uow.polls.refs_with_polls(PollType.TRAINING, TRAINING_REF, training_ids)
+
     async def has_training_poll(self, training_id: int) -> bool:
         async with self._uow_factory() as uow:
             poll = await uow.polls.get_for_ref(PollType.TRAINING, TRAINING_REF, training_id)

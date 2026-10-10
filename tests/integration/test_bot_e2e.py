@@ -12,7 +12,14 @@ from typing import Any
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import DeleteMessage, SendMessage, SetMyCommands, TelegramMethod
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import (
+    AnswerCallbackQuery,
+    DeleteMessage,
+    SendMessage,
+    SetMyCommands,
+    TelegramMethod,
+)
 from aiogram.types import (
     BotCommandScopeChat,
     CallbackQuery,
@@ -56,6 +63,7 @@ class RecordingSession(BaseSession):
     def __init__(self) -> None:
         super().__init__()
         self.requests: list[TelegramMethod[Any]] = []
+        self.answered: set[str] = set()
 
     async def make_request(
         self,
@@ -65,6 +73,10 @@ class RecordingSession(BaseSession):
     ) -> Any:
         self.requests.append(method)
         await asyncio.sleep(0.005)  # как у настоящей сети: параллельные апдейты перемешиваются
+        if isinstance(method, AnswerCallbackQuery):  # как Telegram: на нажатие — один ответ
+            if method.callback_query_id in self.answered:
+                raise TelegramBadRequest(method=method, message="Bad Request: query is too old")
+            self.answered.add(method.callback_query_id)
         if isinstance(method, SendMessage):
             return Message(
                 message_id=len(self.requests),
@@ -406,6 +418,21 @@ async def test_training_cancel_needs_confirmation(
         ),
     )
 
+    # в списке /attendance тренировка без опроса помечена
+    await harness.private(COACH, "/attendance")
+    buttons = [
+        b.text
+        for m in harness.session.requests
+        if isinstance(m, SendMessage) and m.text == ru.ATTENDANCE_TRAININGS
+        for row in m.reply_markup.inline_keyboard  # type: ignore[union-attr]
+        for b in row
+    ]
+    assert buttons and all(b.endswith(ru.ATTENDANCE_NO_POLL_MARK) for b in buttons)
+
+    # сводка по тренировке без опроса: ошибка после ответа на нажатие — сообщением, не тишиной
+    await harness.press(COACH, ItemAction(kind="tr", action="att", item_id=training.id).pack())
+    assert harness.session.texts_to(COACH)[-1] == ru.ATTENDANCE_NO_POLL
+
     await harness.press(COACH, ItemAction(kind="tr", action="cancel", item_id=training.id).pack())
     assert "Отменить тренировку" in harness.session.texts_to(COACH)[-1]
     assert (await services.trainings.get(training.id)).status == TrainingStatus.PLANNED
@@ -738,7 +765,8 @@ async def test_permissions_admin_toggles_role(
 async def test_forged_buttons_are_refused(
     harness: Harness, services: Services, notifier: FakeNotifier
 ) -> None:
-    """Кнопки админки и /invite с подделанными данными: игрок ничего не получает."""
+    """Кнопки админки и /invite с подделанными данными: игрок не получает ни ссылки, ни
+    списков — только отказ."""
     await bind(harness)
     await harness.member(PLAYER, joined=True)
     squad = await services.squads.squad_for_chat(GROUP_ID)
@@ -753,7 +781,7 @@ async def test_forged_buttons_are_refused(
         RoleAction(squad_id=squad.id, user_id=1, action="open").pack(),
     ):
         await harness.press(PLAYER, data)
-    assert len(harness.session.texts_to(PLAYER)) == sent_before  # ни ссылки, ни списков
+    assert set(harness.session.texts_to(PLAYER)[sent_before:]) <= {ru.NO_PERMISSION}
 
 
 async def test_payment_block_only_for_coach(

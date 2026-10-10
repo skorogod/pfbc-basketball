@@ -332,10 +332,13 @@ async def show_attendance_choice(message: Message, squad: SquadDTO, services: Se
         return
     # два списка — тренировки отдельно от событий, чтобы не искать в общей куче
     if trainings:
+        # по тренировке без опроса сводки нет — помечаем, чтобы не нажимать зря
+        with_polls = await services.polls.trainings_with_polls([t.id for t in trainings])
         builder = InlineKeyboardBuilder()
         for t in trainings:
+            mark = "" if t.id in with_polls else ru.ATTENDANCE_NO_POLL_MARK
             builder.button(
-                text=f"🏀 {format_local(t.starts_at, squad.timezone)}",
+                text=f"🏀 {format_local(t.starts_at, squad.timezone)}{mark}",
                 callback_data=ItemAction(kind="tr", action="att", item_id=t.id),
             )
         builder.adjust(1)
