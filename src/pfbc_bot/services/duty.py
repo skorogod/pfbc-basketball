@@ -33,6 +33,7 @@ from pfbc_bot.domain.enums import (
     DutyStatus,
     MembershipStatus,
     PollType,
+    SquadRole,
     TopicPurpose,
 )
 from pfbc_bot.domain.permissions import Permission
@@ -554,10 +555,14 @@ class DutyService:
 
     @staticmethod
     async def _active_member(uow: UnitOfWork, squad_id: int, user_id: int) -> User:
+        """Участник, который может дежурить: активный в составе и не тренер."""
         member = await uow.members.get(user_id, squad_id)
         user = await uow.users.get(user_id)
         if member is None or user is None or member.status != MembershipStatus.ACTIVE:
             raise NotFound(ru.MEMBER_NOT_FOUND)
+        roles = (await uow.members.roles_by_squad(user_id, [squad_id])).get(squad_id, set())
+        if SquadRole.COACH in roles:
+            raise Conflict(ru.DUTY_COACH_NOT_ALLOWED)
         return user
 
     # --- замена ---
@@ -673,7 +678,21 @@ class DutyService:
     ) -> int:
         """Вышедший из группы снимается с будущих дежурств состава: автозамена, капитану —
         уведомление (если заменить некем — список для выбора). Возвращает число замен."""
-        now = now or utcnow()
+        return await self._release_upcoming(
+            user_id, squad_id, now or utcnow(), ru.DUTY_LEFT_CAPTAIN
+        )
+
+    async def handle_became_coach(
+        self, user_id: int, squad_id: int, *, now: datetime | None = None
+    ) -> int:
+        """Тренер не дежурит: назначенному тренером — замена на будущих дежурствах состава."""
+        return await self._release_upcoming(
+            user_id, squad_id, now or utcnow(), ru.DUTY_COACH_CAPTAIN
+        )
+
+    async def _release_upcoming(
+        self, user_id: int, squad_id: int, now: datetime, report: str
+    ) -> int:
         async with self._uow_factory() as uow:
             pending = [
                 (a.id, a.training_id)
@@ -692,7 +711,7 @@ class DutyService:
                     or training.starts_at <= now
                 ):
                     continue
-                await self._replace_and_report(uow, training, assignment, now, ru.DUTY_LEFT_CAPTAIN)
+                await self._replace_and_report(uow, training, assignment, now, report)
                 await uow.commit()
                 replaced += 1
         return replaced
@@ -903,11 +922,12 @@ class DutyService:
         exclude: Collection[int],
         button: Callable[[User], InlineButton],
     ) -> Keyboard:
-        """Активные участники состава кнопками по два в ряд (кроме exclude)."""
+        """Активные участники состава кнопками по два в ряд (кроме exclude и тренеров)."""
+        roles = await uow.members.roles_in_squad(training.squad_id)
         buttons = [
             button(user)
             for _, user in await uow.members.list_active_for_squad(training.squad_id)
-            if user.id not in exclude
+            if user.id not in exclude and SquadRole.COACH not in roles.get(user.id, set())
         ][:MAX_PICK_BUTTONS]
         return [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
 
@@ -925,7 +945,8 @@ class DutyService:
 
     @staticmethod
     async def _candidates(uow: UnitOfWork, training: Training) -> list[DutyCandidate]:
-        """Активные участники состава, ответившие «Да» на опрос этой тренировки."""
+        """Активные участники состава, ответившие «Да» на опрос этой тренировки. Тренеры не
+        дежурят, даже если отметились в опросе."""
         poll = await uow.polls.get_for_ref(PollType.TRAINING, TRAINING_REF, training.id)
         if poll is None:
             return []
@@ -934,10 +955,11 @@ class DutyService:
             for user_id, options in (await uow.polls.answers(poll.id)).items()
             if TRAINING_POLL_YES in options
         }
+        roles = await uow.members.roles_in_squad(training.squad_id)
         members = [
             m
             for m, _ in await uow.members.list_active_for_squad(training.squad_id)
-            if m.user_id in yes_ids
+            if m.user_id in yes_ids and SquadRole.COACH not in roles.get(m.user_id, set())
         ]
         last = await uow.trainings.last_duty_at(training.squad_id, [m.user_id for m in members])
         return [

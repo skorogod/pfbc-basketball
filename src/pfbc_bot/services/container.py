@@ -49,7 +49,7 @@ def build_services(
         admins=AdminService(uow_factory, admin_ids),
         membership=membership,
         registration=RegistrationService(uow_factory, notifier),
-        squads=SquadService(uow_factory),
+        squads=SquadService(uow_factory, duty),
         settings=SettingsService(uow_factory),
         trainings=TrainingService(uow_factory, notifier),
         duty=duty,

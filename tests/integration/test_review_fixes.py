@@ -127,7 +127,8 @@ async def test_one_active_payment_per_match_under_race(
             {"e": match_id},
         )
         assert rows.scalar() == 1
-    assert len(notifier.stopped_polls) == 1  # опрос «Оплатил» проигравшего — закрыт
+    # закрыты опрос участия (один раз) и опрос «Оплатил» проигравшего
+    assert len(notifier.stopped_polls) == 2 and notifier.stopped_polls[0] == (CHAT_ID, 1001)
 
 
 async def test_deleting_match_cancels_payment(
@@ -149,9 +150,11 @@ async def test_polls_close_when_event_starts(
     """Опрос участия закрывается в начале события; опрос «Оплатил» — нет (можно позже)."""
     match_id = await _match(services, squad_id)
     coach = await ctx_of(services, COACH)
-    await services.game_payments.create(coach, _payment(match_id, coach.user.id, None), now=NOW)
     assert await services.polls.close_due(now=at(11)) == 0
     assert await services.polls.close_due(now=at(12)) == 1
+    assert notifier.stopped_polls == [(CHAT_ID, 1001)]
+    # сбор после игры: закрытый опрос участия повторно не останавливается
+    await services.game_payments.create(coach, _payment(match_id, coach.user.id, None), now=NOW)
     assert notifier.stopped_polls == [(CHAT_ID, 1001)]
     assert await services.polls.close_due(now=at(13)) == 0
     async with uow_factory() as uow:  # ответы закрытого опроса по-прежнему учитываются

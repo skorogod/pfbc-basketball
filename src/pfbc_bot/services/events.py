@@ -358,7 +358,7 @@ class EventService:
                 },
             )
             await uow.commit()
-        if poll is not None:
+        if poll is not None and poll.closed_at is None:  # закрытый уже остановлен в Telegram
             await self._notifier.stop_poll(poll.chat_id, poll.message_id)
         if not dto.notify_group:
             return dto
@@ -457,7 +457,7 @@ class EventService:
             )
             await uow.commit()
             for poll in polls:
-                if poll is not None:
+                if poll is not None and poll.closed_at is None:
                     await self._notifier.stop_poll(poll.chat_id, poll.message_id)
             [dto] = await to_dtos(uow, [event])
             if _is_over(dto, now):

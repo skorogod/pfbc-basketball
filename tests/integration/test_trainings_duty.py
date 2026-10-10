@@ -169,6 +169,27 @@ async def test_shortage_notifies_captain(
     assert len(shortage) == 1 and shortage[0].keyboard
 
 
+async def test_coach_who_answered_yes_is_not_on_duty(
+    services: Services, notifier: FakeNotifier, uow_factory: UowFactory, team: dict[str, int]
+) -> None:
+    """Тренер никогда не дежурил (в очереди был бы первым), но дежурным не назначается."""
+    training_id = (await services.trainings.upcoming(team["squad_id"], now=at(9)))[0].id
+    await services.polls.publish_training_polls(now=at(9))
+    for tg_id in (COACH, 1, 2):
+        await services.polls.record_answer("poll-1", tg_id, [YES], now=at(10))
+    await services.duty.assign_due(now=at(16))
+    assert await _active_duty(uow_factory, training_id) == {team["u1"], team["u2"]}
+
+    # вручную тренера тоже не назначить: в списке выбора его нет
+    captain, coach = await ctx_of(services, CAPTAIN), await ctx_of(services, COACH)
+    assert await services.duty.send_pick_list(captain, training_id, now=at(17))
+    picks = {b.callback_data for row in notifier.to(CAPTAIN)[-1].keyboard or [] for b in row}
+    pick = callbacks.pack(callbacks.DUTY, callbacks.DUTY_PICK, training_id, coach.user.id)
+    assert picks and pick not in picks
+    with pytest.raises(Conflict):
+        await services.duty.manual_pick(captain, training_id, coach.user.id, now=at(17))
+
+
 async def test_duty_feature_flag_disables_assignment(
     services: Services, notifier: FakeNotifier, team: dict[str, int]
 ) -> None:
@@ -370,6 +391,13 @@ async def test_fix_past_duty(
     )
     with pytest.raises(Conflict):
         await services.duty.confirm_fix(captain, assignment_3, team["u2"], now=at(20))
+    # тренер не дежурит: его нет в списке, и выбрать его нельзя
+    coach_id = (await ctx_of(services, COACH)).user.id
+    assert (
+        callbacks.pack(callbacks.DUTY, callbacks.DUTY_FIX_PICK, assignment_3, coach_id) not in picks
+    )
+    with pytest.raises(Conflict):
+        await services.duty.confirm_fix(captain, assignment_3, coach_id, now=at(20))
 
     # вопрос-подтверждение ничего не меняет
     prompt = await services.duty.confirm_fix(captain, assignment_3, team["u4"], now=at(20))
@@ -514,6 +542,18 @@ async def test_member_who_left_is_replaced_on_duty(
     assert await _active_duty(uow_factory, training_id) == {team["u2"], team["u1"]}
     assert any("вышел(а) из группы" in m.text for m in notifier.to(CAPTAIN))
     assert any("Замена дежурного" in m.text for m in notifier.to(CHAT_ID))
+
+
+async def test_new_coach_is_replaced_on_duty(
+    services: Services, notifier: FakeNotifier, uow_factory: UowFactory, team: dict[str, int]
+) -> None:
+    training_id, _ = await _assign_today(services, uow_factory, team)
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    await services.squads.set_role(
+        admin, team["squad_id"], team["u3"], SquadRole.COACH, grant=True, now=at(16, 30)
+    )
+    assert await _active_duty(uow_factory, training_id) == {team["u2"], team["u1"]}
+    assert any("теперь тренер" in m.text for m in notifier.to(CAPTAIN))
 
 
 async def test_manual_poll_before_scheduler(

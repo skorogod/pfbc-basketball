@@ -1,12 +1,14 @@
 """Администрирование составов: привязка групп и топиков, роли (ФТ-10)."""
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from pfbc_bot.db.models import Squad, SquadChat
 from pfbc_bot.domain.enums import MembershipStatus, SquadRole, TopicPurpose
 from pfbc_bot.repositories.uow import UowFactory
 from pfbc_bot.schemas.squads import MembershipDTO, SquadDTO, SquadMemberView, UserContext
 from pfbc_bot.services.common import to_dto
+from pfbc_bot.services.duty import DutyService
 from pfbc_bot.services.errors import Conflict, NotFound, PermissionDenied
 from pfbc_bot.texts import ru
 
@@ -19,8 +21,9 @@ class SquadOverview:
 
 
 class SquadService:
-    def __init__(self, uow_factory: UowFactory) -> None:
+    def __init__(self, uow_factory: UowFactory, duty: DutyService | None = None) -> None:
         self._uow_factory = uow_factory
+        self._duty = duty
 
     @staticmethod
     def _require_admin(actor: UserContext) -> None:
@@ -89,8 +92,10 @@ class SquadService:
         role: SquadRole,
         *,
         grant: bool,
+        now: datetime | None = None,
     ) -> SquadMemberView:
-        """Выдаёт или снимает роль участнику состава. Только для активных участников."""
+        """Выдаёт или снимает роль участнику состава. Только для активных участников.
+        Тренер не дежурит: назначенный тренером снимается с будущих дежурств."""
         self._require_admin(actor)
         async with self._uow_factory() as uow:
             member = await uow.members.get(user_id, squad_id)
@@ -110,11 +115,14 @@ class SquadService:
             )
             await uow.commit()
             roles = (await uow.members.roles_by_squad(user_id, [squad_id])).get(squad_id, set())
-            return SquadMemberView(
+            view = SquadMemberView(
                 user=to_dto(user),
                 membership=MembershipDTO.model_validate(member),
                 roles=frozenset(roles),
             )
+        if grant and role == SquadRole.COACH and self._duty is not None:
+            await self._duty.handle_became_coach(user_id, squad_id, now=now)
+        return view
 
     async def overview(self) -> list[SquadOverview]:
         async with self._uow_factory() as uow:

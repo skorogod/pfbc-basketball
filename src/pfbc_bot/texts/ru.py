@@ -259,6 +259,9 @@ DUTY_AUTO_REPLACED_CAPTAIN = (
     "ℹ️ {old} ответил(а) «не приду» на тренировку {when} — дежурный заменён на {new}."
 )
 DUTY_LEFT_CAPTAIN = "ℹ️ {old} вышел(а) из группы — дежурный на тренировку {when} заменён на {new}."
+DUTY_COACH_CAPTAIN = (
+    "ℹ️ {old} теперь тренер и не дежурит — дежурный на тренировку {when} заменён на {new}."
+)
 DUTY_SELF_DECLINED_CAPTAIN = (
     "ℹ️ {old} не может дежурить на тренировке {when} — дежурный заменён на {new}."
 )
@@ -282,6 +285,7 @@ DUTY_PICK_PROMPT = "Выберите дежурного:"
 DUTY_MANUAL_SENT = "Список для выбора отправлен вам в личные сообщения."
 DUTY_ALREADY_CHANGED = "Это назначение уже изменено."
 DUTY_ALREADY_ASSIGNED = "Этот участник уже назначен дежурным."
+DUTY_COACH_NOT_ALLOWED = "Тренер не дежурит — выберите другого участника."
 DUTY_TRAINING_PASSED = "Тренировка уже началась или отменена."
 DUTY_NOT_YOURS = "Это не ваше дежурство."
 DUTY_PAST_DM = (

@@ -79,6 +79,9 @@ async def test_payment_post_poll_and_reminders(
     assert "Оплатить до" in post.text
     assert notifier.polls[-1] == (CHAT_ID, "💰 Оплата игры «PFBC — Динамо»: 2 500 ₽", GAMES_THREAD)
     assert await services.game_payments.saved_details(coach.user.id) == DETAILS
+    assert notifier.stopped_polls == [(CHAT_ID, 1001)]  # голосование участия закрыто
+    # закрытый опрос участия планировщик не трогает повторно
+    assert await services.polls.close_due(now=at(12)) == 0
 
     await services.polls.record_answer("poll-2", 1, [PAID], now=NOW)  # игрок оплатил
     await services.polls.record_answer("poll-2", 3, [PAID], now=NOW)  # болельщик оплатил
@@ -126,7 +129,8 @@ async def test_new_payment_replaces_previous_and_rules(
         coach, payment(match_id, NOW + timedelta(hours=2), coach.user.id), now=NOW
     )
     await services.game_payments.create(coach, payment(match_id, None, coach.user.id), now=NOW)
-    assert notifier.stopped_polls == [(CHAT_ID, 1002)]  # прежний опрос «Оплатил» закрыт
+    # первый сбор закрыл опрос участия, второй — прежний опрос «Оплатил»
+    assert notifier.stopped_polls == [(CHAT_ID, 1001), (CHAT_ID, 1002)]
     # у действующего сбора срока нет — напоминаний нет, у прежнего — отменены
     assert await services.game_payments.remind_due(now=NOW + timedelta(hours=3)) == 0
 

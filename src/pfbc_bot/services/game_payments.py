@@ -160,7 +160,8 @@ class GamePaymentService:
         self, actor: UserContext, data: GamePaymentCreate, *, now: datetime | None = None
     ) -> GamePaymentDTO:
         """Пост в топике «Игры»: игра, сумма, получатель и его реквизиты, срок — и опрос
-        «Оплатил». Прежний сбор по этой игре закрывается. Реквизиты запоминаются у получателя.
+        «Оплатил». Прежний сбор по этой игре и голосование участия в ней закрываются (платят
+        ответившие «Буду (игрок)» — состав больше не меняется). Реквизиты запоминаются у получателя.
 
         В две фазы, чтобы отправка не держала транзакцию: проверки → пост и опрос в группе
         (опрос не принят — пост удаляется, сбор не создаётся) → под блокировкой матча запись
@@ -201,6 +202,12 @@ class GamePaymentService:
             match = await self._match(uow, actor, data.match_event_id, lock=True)
             previous = await uow.game_payments.active_for_event(match.id)
             previous_poll = await self._cancel(uow, previous, now) if previous else None
+            # сбор объявлен — состав на игру зафиксирован: голосование участия закрывается
+            match_poll = await uow.polls.get_for_ref(PollType.MATCH, EVENT_REF, match.id)
+            if match_poll is not None and match_poll.closed_at is None:
+                match_poll.closed_at = now
+            else:
+                match_poll = None
             payment = await uow.game_payments.add(
                 GamePayment(
                     squad_id=match.squad_id,
@@ -239,8 +246,9 @@ class GamePaymentService:
             )
             await uow.commit()
             dto = GamePaymentDTO.model_validate(payment)
-        if previous_poll is not None:
-            await self._notifier.stop_poll(previous_poll.chat_id, previous_poll.message_id)
+        for poll in (previous_poll, match_poll):
+            if poll is not None:
+                await self._notifier.stop_poll(poll.chat_id, poll.message_id)
         return dto
 
     @staticmethod
