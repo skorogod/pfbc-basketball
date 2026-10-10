@@ -880,3 +880,17 @@ async def test_receipts_command_publishes_once_a_month(
     await harness.private(COACH, "/receipts")
     assert "уже опубликован" in harness.session.texts_to(COACH)[-1]
     assert len(notifier.polls) == 1
+
+    # «Завершить сбор» → подтверждение → опрос закрыт, напоминаний нет
+    current = await services.receipts.current(await ctx_of(services, COACH), squad.id)
+    assert current is not None
+    await harness.press(
+        COACH, ItemAction(kind="rc", action="close", item_id=current.request_id).pack()
+    )
+    assert harness.session.texts_to(COACH)[-1] == ru.RECEIPT_CONFIRM_CLOSE
+    await harness.press(
+        COACH, ItemAction(kind="rc", action="close_ok", item_id=current.request_id).pack()
+    )
+    assert notifier.stopped_polls
+    await harness.private(COACH, "/receipts")
+    assert harness.session.texts_to(COACH)[-1].endswith(ru.PAYMENT_CLOSED_MARK)

@@ -246,3 +246,27 @@ async def test_default_deadline_is_configurable(services: Services, match_id: in
         await services.game_payments.default_deadline(
             await ctx_of(services, CAPTAIN), squad_id, now=NOW
         )
+
+
+async def test_closed_payment_poll_stops_reminders(
+    services: Services, notifier: FakeNotifier, match_id: int
+) -> None:
+    """Сбор завершён кнопкой (бот закрывает опрос) или опрос закрыт в Telegram — не напоминаем."""
+    coach = await ctx_of(services, COACH)
+    created = await services.game_payments.create(
+        coach, payment(match_id, NOW + timedelta(hours=2), coach.user.id), now=NOW
+    )
+    with pytest.raises(PermissionDenied):
+        await services.game_payments.close(await ctx_of(services, CAPTAIN), created.id, now=NOW)
+    assert await services.game_payments.close(coach, created.id, now=NOW) is True
+    assert notifier.stopped_polls[-1] == (CHAT_ID, 1002)
+    assert await services.game_payments.close(coach, created.id, now=NOW) is False
+    status = await services.game_payments.status(coach, match_id)
+    assert status is not None and status.closed
+    assert await services.game_payments.remind_due(now=NOW + timedelta(hours=3)) == 0
+
+    # новый сбор; его опрос закрыли в Telegram — бот узнаёт из обновления опроса
+    await services.game_payments.create(coach, payment(match_id, at(20), coach.user.id), now=NOW)
+    assert await services.polls.mark_closed("poll-3", now=NOW) is True
+    assert await services.polls.mark_closed("poll-3", now=NOW) is False
+    assert await services.game_payments.remind_due(now=at(20)) == 0

@@ -484,6 +484,7 @@ RECEIPT_ASK_DEADLINE = (
 )
 RECEIPT_BTN_DEFAULT = "⏰ До {when}"
 RECEIPT_CREATED = "✅ Опрос о квитанциях за {month} опубликован в группе."
+RECEIPT_NOT_FOUND = "Сбор квитанций не найден."
 RECEIPT_NOT_SENT = "Не удалось опубликовать опрос в группе — проверьте, что бот может там писать."
 
 # --- сбор денег за игру (не путать с оплатой тренировок по квитанциям) ---
@@ -508,6 +509,21 @@ GAME_PAYMENT_STATUS = (
     "\n\n💰 <b>Оплата: {amount}</b>{deadline}{collector}\nОплатили ({paid_count}): {paid}\n"
     "Не оплатили ({unpaid_count}): {unpaid}{others}"
 )
+PAYMENT_BTN_CLOSE = "🏁 Завершить сбор"
+PAYMENT_BTN_CONFIRM_CLOSE = "✅ Да, завершить"
+PAYMENT_ALREADY_CLOSED = "Сбор уже завершён."
+PAYMENT_CLOSED_MARK = "\n🏁 Сбор завершён — напоминаний нет."
+GAME_PAYMENT_CONFIRM_CLOSE = (
+    "Завершить сбор денег за игру? Опрос «Оплатил» в группе закроется, напоминаний больше "
+    "не будет. Открыть его снова нельзя."
+)
+GAME_PAYMENT_CLOSED = "🏁 Сбор денег за игру завершён: опрос закрыт, напоминаний больше не будет."
+RECEIPT_CONFIRM_CLOSE = (
+    "Завершить сбор квитанций за месяц? Опрос в группе закроется, напоминаний больше не будет. "
+    "Открыть его снова нельзя."
+)
+RECEIPT_CLOSED = "🏁 Сбор квитанций за {month} завершён: опрос закрыт, напоминаний больше не будет."
+GAME_PAYMENT_NOT_FOUND = "Сбор денег не найден или отменён."
 GAME_PAYMENT_STATUS_OTHERS = "\nОплатили, но не отмечены игроками: {names}"
 GAME_PAYMENT_CHOOSE_MATCH = "За какую игру собираем деньги?"
 GAME_PAYMENT_NO_MATCHES = "Нет матчей для сбора денег. Создайте матч: /event_add"

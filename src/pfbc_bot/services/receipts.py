@@ -10,6 +10,7 @@
 """
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
@@ -63,6 +64,15 @@ REMINDER_LOOKBACK = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class MonthRequest:
+    """Опрос о квитанциях за текущий месяц: текст для тренера и завершён ли сбор."""
+
+    request_id: int
+    text: str
+    closed: bool
+
+
 def reminder_key(request_id: int, number: int = 0) -> str:
     base = f"receipt:{request_id}"
     return base if number == 0 else f"{base}:{number}"
@@ -93,13 +103,47 @@ class ReceiptService:
 
     async def current(
         self, actor: UserContext, squad_id: int, *, now: datetime | None = None
-    ) -> str | None:
-        """Опрос этого месяца уже опубликован — текст с тем, кто отметился; None — ещё нет."""
+    ) -> MonthRequest | None:
+        """Опрос этого месяца уже опубликован — кто отметился и открыт ли он; None — ещё нет."""
         require(actor, squad_id, Permission.RECEIPTS)
         async with self._uow_factory() as uow:
             tz = squad_tz(await uow.squads.get(squad_id))
             request = await uow.receipts.for_month(squad_id, month_of(now or utcnow(), tz))
-            return await self._already(uow, request, tz) if request else None
+            if request is None:
+                return None
+            poll = await uow.polls.get_for_ref(PollType.RECEIPT, RECEIPT_REF, request.id)
+            return MonthRequest(
+                request_id=request.id,
+                text=await self._already(uow, request, tz),
+                closed=poll is None or poll.closed_at is not None,
+            )
+
+    async def close(
+        self, actor: UserContext, request_id: int, *, now: datetime | None = None
+    ) -> str | None:
+        """Завершить сбор квитанций: опрос в группе закрывается, напоминаний больше нет.
+        Возвращает месяц; None — сбор уже завершён."""
+        now = now or utcnow()
+        async with self._uow_factory() as uow:
+            request = await uow.receipts.get(request_id)
+            if request is None:
+                raise NotFound(ru.RECEIPT_NOT_FOUND)
+            require(actor, request.squad_id, Permission.RECEIPTS)
+            poll = await uow.polls.get_for_ref(PollType.RECEIPT, RECEIPT_REF, request.id)
+            if poll is None or poll.closed_at is not None:
+                return None
+            poll.closed_at = now
+            await uow.system.audit(
+                actor_user_id=actor.user.id,
+                action="receipt.close",
+                entity="squad",
+                entity_id=request.squad_id,
+                payload={"request_id": request.id},
+            )
+            await uow.commit()
+            month = month_title(request.month)
+        await self._notifier.stop_poll(poll.chat_id, poll.message_id)
+        return month
 
     async def create(
         self,
@@ -251,6 +295,9 @@ class ReceiptService:
             async with self._uow_factory() as uow:
                 request = await uow.receipts.get(request_id)
                 if request is None:
+                    continue
+                poll = await uow.polls.get_for_ref(PollType.RECEIPT, RECEIPT_REF, request.id)
+                if poll is None or poll.closed_at is not None:  # сбор завершён
                     continue
                 settings = await load_squad_settings(uow, request.squad_id)
                 number = due_payment_reminder(

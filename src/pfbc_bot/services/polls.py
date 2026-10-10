@@ -202,6 +202,18 @@ class PollService:
             await self._notifier.stop_poll(poll.chat_id, poll.message_id)
         return len(polls)
 
+    async def mark_closed(self, tg_poll_id: str, *, now: datetime | None = None) -> bool:
+        """Telegram сообщил, что опрос закрыт: отмечаем — по сбору денег или квитанций
+        прекращаются напоминания. True — опрос был открыт."""
+        async with self._uow_factory() as uow:
+            poll = await uow.polls.get_by_tg_id(tg_poll_id)
+            if poll is None or poll.closed_at is not None:
+                return False
+            poll.closed_at = now or utcnow()
+            await uow.commit()
+            log.info("poll_closed_in_telegram", poll_id=poll.id, type=poll.type)
+            return True
+
     async def has_training_poll(self, training_id: int) -> bool:
         async with self._uow_factory() as uow:
             poll = await uow.polls.get_for_ref(PollType.TRAINING, TRAINING_REF, training_id)

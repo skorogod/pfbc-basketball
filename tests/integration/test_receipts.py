@@ -114,7 +114,7 @@ async def test_manual_poll_blocks_scheduled_one(
     # повторный ручной запуск — отказ с тем, кто уже отметился
     await services.polls.record_answer("poll-1", 1, [SENT], now=at(1, 9))
     already = await services.receipts.current(coach, squad_id, now=at(2, 8))
-    assert already is not None and "Отметили «Отправил»: 1 из 4" in already
+    assert already is not None and "Отметили «Отправил»: 1 из 4" in already.text
     with pytest.raises(Conflict, match="уже опубликован"):
         await services.receipts.create(coach, squad_id, at(6, 20), now=at(2, 8))
 
@@ -166,3 +166,20 @@ async def test_concurrent_manual_and_scheduled_publish_once(
     assert len(notifier.deleted) in (0, 2)
     if notifier.deleted:
         assert notifier.deleted[0][0] == CHAT_ID
+
+
+async def test_closed_receipt_poll_stops_reminders(
+    services: Services, notifier: FakeNotifier, squad_id: int
+) -> None:
+    coach = await ctx_of(services, COACH)
+    await services.receipts.create(coach, squad_id, at(2, 10), now=at(1, 8))
+    current = await services.receipts.current(coach, squad_id, now=at(1, 9))
+    assert current is not None and not current.closed
+    assert await services.receipts.close(coach, current.request_id, now=at(1, 9)) == "ноябрь 2026"
+    assert notifier.stopped_polls == [(CHAT_ID, 1001)]
+    assert await services.receipts.close(coach, current.request_id, now=at(1, 9)) is None
+    current = await services.receipts.current(coach, squad_id, now=at(1, 9))
+    assert current is not None and current.closed
+    assert await services.receipts.remind_due(now=at(2, 10)) == 0
+    # завершённый сбор месяц не освобождает — по расписанию опрос не публикуется
+    assert await services.receipts.publish_due(now=at(1, 10)) == 0

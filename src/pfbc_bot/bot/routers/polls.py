@@ -5,12 +5,19 @@
 """
 
 from aiogram import Router
-from aiogram.types import PollAnswer
+from aiogram.types import Poll, PollAnswer
 
 from pfbc_bot.bot.middlewares.access import to_telegram_user
 from pfbc_bot.services.container import Services
 
 router = Router(name="polls")
+
+
+@router.poll()
+async def on_poll(poll: Poll, services: Services) -> None:
+    """Состояние опроса бота. Закрыт — по сбору денег или квитанций больше не напоминаем."""
+    if poll.is_closed:
+        await services.polls.mark_closed(poll.id)
 
 
 @router.poll_answer()

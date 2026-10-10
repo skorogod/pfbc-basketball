@@ -11,9 +11,16 @@ from aiogram.enums import ChatType
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from pfbc_bot.bot.helpers import ask_squad, callback_message
-from pfbc_bot.bot.keyboards.common import Choice, SquadPick, choices_keyboard
+from pfbc_bot.bot.keyboards.common import (
+    Choice,
+    ItemAction,
+    SquadPick,
+    choices_keyboard,
+    confirm_markup,
+)
 from pfbc_bot.bot.states import ReceiptRequestCreation
 from pfbc_bot.domain.dates import format_local, localize, parse_local_datetime, to_local, utcnow
 from pfbc_bot.domain.permissions import Permission
@@ -52,8 +59,16 @@ async def on_squad(
 async def _start(
     message: Message, squad: SquadDTO, ctx: UserContext, services: Services, state: FSMContext
 ) -> None:
-    if (already := await services.receipts.current(ctx, squad.id)) is not None:
-        await message.answer(already)
+    if (current := await services.receipts.current(ctx, squad.id)) is not None:
+        if current.closed:
+            await message.answer(current.text + ru.PAYMENT_CLOSED_MARK)
+            return
+        builder = InlineKeyboardBuilder()
+        builder.button(
+            text=ru.PAYMENT_BTN_CLOSE,
+            callback_data=ItemAction(kind="rc", action="close", item_id=current.request_id),
+        )
+        await message.answer(current.text, reply_markup=builder.as_markup())
         return
     deadline = await services.receipts.default_deadline(ctx, squad.id)
     await state.clear()
@@ -64,6 +79,30 @@ async def _start(
         ru.RECEIPT_ASK_DEADLINE,
         reply_markup=choices_keyboard(DEADLINE_FLOW, [("default", button)], width=1),
     )
+
+
+@router.callback_query(ItemAction.filter((F.kind == "rc") & (F.action == "close")))
+async def on_close(callback: CallbackQuery, callback_data: ItemAction) -> None:
+    """«Завершить сбор» — подтверждение вторым нажатием."""
+    await callback.answer()
+    if message := callback_message(callback):
+        await message.answer(
+            ru.RECEIPT_CONFIRM_CLOSE,
+            reply_markup=confirm_markup(
+                "rc", "close_ok", callback_data.item_id, ru.PAYMENT_BTN_CONFIRM_CLOSE
+            ),
+        )
+
+
+@router.callback_query(ItemAction.filter((F.kind == "rc") & (F.action == "close_ok")))
+async def on_close_ok(
+    callback: CallbackQuery, callback_data: ItemAction, ctx: UserContext, services: Services
+) -> None:
+    await callback.answer()
+    month = await services.receipts.close(ctx, callback_data.item_id)
+    if message := callback_message(callback):
+        text = ru.RECEIPT_CLOSED.format(month=month) if month else ru.PAYMENT_ALREADY_CLOSED
+        await message.edit_text(text, reply_markup=None)
 
 
 @router.message(ReceiptRequestCreation.deadline, F.text)

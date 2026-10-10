@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from pfbc_bot.bot.helpers import ask_squad, callback_message, dismiss
-from pfbc_bot.bot.keyboards.common import ItemAction, SquadPick
+from pfbc_bot.bot.keyboards.common import ItemAction, SquadPick, confirm_markup
 from pfbc_bot.bot.states import ScheduleEdit, TrainingEdit
 from pfbc_bot.domain.dates import (
     WEEKDAY_SHORT,
@@ -132,27 +132,13 @@ async def on_schedule_action(
         label = f"{WEEKDAY_SHORT[schedule.weekday]} {schedule.start_time:%H:%M} · {schedule.venue}"
         await message.answer(
             ru.SCHEDULE_CONFIRM_REMOVE.format(label=html.escape(label)),
-            reply_markup=_confirm_markup(
+            reply_markup=confirm_markup(
                 "sch", "del_ok", callback_data.item_id, ru.SCHEDULE_BTN_CONFIRM_REMOVE
             ),
         )
     elif callback_data.action == "del_ok":  # шаг 2: подтверждено — вопрос заменяется результатом
         await services.trainings.remove_schedule(ctx, callback_data.item_id)
         await message.edit_text(ru.SCHEDULE_REMOVED, reply_markup=None)
-
-
-def _confirm_markup(
-    kind: str, action: str, item_id: int, confirm_text: str
-) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text=confirm_text, callback_data=ItemAction(kind=kind, action=action, item_id=item_id)
-    )
-    builder.button(
-        text=ru.BTN_CANCEL, callback_data=ItemAction(kind="confirm", action="no", item_id=0)
-    )
-    builder.adjust(2)
-    return builder.as_markup()
 
 
 @router.callback_query(ItemAction.filter(F.kind == "confirm"))
@@ -229,7 +215,7 @@ async def on_training_action(
             ru.TRAINING_CONFIRM_CANCEL.format(
                 when=format_local(training.starts_at, squad.timezone)
             ),
-            reply_markup=_confirm_markup(
+            reply_markup=confirm_markup(
                 "tr", "cancel_ok", callback_data.item_id, ru.TRAINING_BTN_CONFIRM_CANCEL
             ),
         )
@@ -328,7 +314,7 @@ async def on_poll_action(
         text = ru.POLL_CONFIRM_RESTART if exists else ru.POLL_CONFIRM_START
         await message.answer(
             text.format(when=format_local(training.starts_at, squad.timezone)),
-            reply_markup=_confirm_markup(
+            reply_markup=confirm_markup(
                 "poll", "start_ok", callback_data.item_id, ru.POLL_BTN_CONFIRM
             ),
         )
@@ -392,21 +378,24 @@ async def on_attendance(
     )
 
 
-async def _payment_status(ctx: UserContext, services: Services, event_id: int, tz: str) -> str:
-    """Если за игру собирают деньги — кто из игроков оплатил (только тренеру и админу)."""
+async def _payment_status(
+    ctx: UserContext, services: Services, event_id: int, tz: str
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Если за игру собирают деньги — кто из игроков оплатил (только тренеру и админу) и
+    кнопка «Завершить сбор», пока он идёт."""
     event = await services.events.get(event_id)
     if not ctx.can(event.squad_id, Permission.GAME_PAYMENTS):
-        return ""
+        return "", None
     status = await services.game_payments.status(ctx, event_id)
     if status is None:
-        return ""
+        return "", None
     deadline = status.payment.deadline_at
     others = (
         ru.GAME_PAYMENT_STATUS_OTHERS.format(names=", ".join(status.others_paid))
         if status.others_paid
         else ""
     )
-    return ru.GAME_PAYMENT_STATUS.format(
+    text = ru.GAME_PAYMENT_STATUS.format(
         amount=format_amount(status.payment.amount),
         deadline=f", до {format_local(deadline, tz)}" if deadline else "",
         collector=f"\nПолучатель: {status.collector}" if status.collector else "",
@@ -416,6 +405,14 @@ async def _payment_status(ctx: UserContext, services: Services, event_id: int, t
         unpaid=", ".join(status.unpaid) or "—",
         others=others,
     )
+    if status.closed:
+        return text + ru.PAYMENT_CLOSED_MARK, None
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=ru.PAYMENT_BTN_CLOSE,
+        callback_data=ItemAction(kind="gp", action="close", item_id=status.payment.id),
+    )
+    return text, builder.as_markup()
 
 
 @router.callback_query(ItemAction.filter((F.kind == "ev") & (F.action == "att")))
@@ -430,6 +427,7 @@ async def on_event_attendance(
     event = summary.event
     squad = await services.squads.get(event.squad_id)
     tournament = f" · 🏆 {html.escape(event.tournament_title)}" if event.tournament_title else ""
+    payment, markup = await _payment_status(ctx, services, event.id, squad.timezone)
     await message.answer(
         ru.EVENT_ATTENDANCE.format(
             type=EVENT_TYPE_TITLES[event.type],
@@ -438,5 +436,6 @@ async def on_event_attendance(
             lines=_option_lines(summary.by_option),
             missing=", ".join(summary.not_answered) or "—",
         )
-        + await _payment_status(ctx, services, event.id, squad.timezone)
+        + payment,
+        reply_markup=markup,
     )

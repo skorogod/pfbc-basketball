@@ -18,7 +18,13 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from pfbc_bot.bot.helpers import ask_squad, callback_message, dismiss
-from pfbc_bot.bot.keyboards.common import Choice, ItemAction, SquadPick, choices_keyboard
+from pfbc_bot.bot.keyboards.common import (
+    Choice,
+    ItemAction,
+    SquadPick,
+    choices_keyboard,
+    confirm_markup,
+)
 from pfbc_bot.bot.states import GamePaymentCreation, PaymentDetailsInput
 from pfbc_bot.domain.dates import format_local, localize, parse_local_datetime, to_local, utcnow
 from pfbc_bot.domain.payments import format_amount, format_phone, parse_amount
@@ -72,6 +78,30 @@ async def _choose_match(
         )
     builder.adjust(1)
     await message.answer(ru.GAME_PAYMENT_CHOOSE_MATCH, reply_markup=builder.as_markup())
+
+
+@router.callback_query(ItemAction.filter((F.kind == "gp") & (F.action == "close")))
+async def on_close(callback: CallbackQuery, callback_data: ItemAction) -> None:
+    """«Завершить сбор» в сводке /attendance — подтверждение вторым нажатием."""
+    await callback.answer()
+    if message := callback_message(callback):
+        await message.answer(
+            ru.GAME_PAYMENT_CONFIRM_CLOSE,
+            reply_markup=confirm_markup(
+                "gp", "close_ok", callback_data.item_id, ru.PAYMENT_BTN_CONFIRM_CLOSE
+            ),
+        )
+
+
+@router.callback_query(ItemAction.filter((F.kind == "gp") & (F.action == "close_ok")))
+async def on_close_ok(
+    callback: CallbackQuery, callback_data: ItemAction, ctx: UserContext, services: Services
+) -> None:
+    await callback.answer()
+    closed = await services.game_payments.close(ctx, callback_data.item_id)
+    if message := callback_message(callback):
+        text = ru.GAME_PAYMENT_CLOSED if closed else ru.PAYMENT_ALREADY_CLOSED
+        await message.edit_text(text, reply_markup=None)
 
 
 @router.callback_query(ItemAction.filter((F.kind == "gp") & (F.action == "match")))

@@ -53,3 +53,16 @@ def skip_keyboard(flow: str) -> InlineKeyboardMarkup:
 
 def yes_no_keyboard(flow: str) -> InlineKeyboardMarkup:
     return choices_keyboard(flow, [("yes", ru.BTN_YES), ("no", ru.BTN_NO)])
+
+
+def confirm_markup(kind: str, action: str, item_id: int, confirm_text: str) -> InlineKeyboardMarkup:
+    """Подтверждение вторым нажатием: «confirm_text» и «Отмена» (убирает вопрос)."""
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=confirm_text, callback_data=ItemAction(kind=kind, action=action, item_id=item_id)
+    )
+    builder.button(
+        text=ru.BTN_CANCEL, callback_data=ItemAction(kind="confirm", action="no", item_id=0)
+    )
+    builder.adjust(2)
+    return builder.as_markup()

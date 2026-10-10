@@ -92,6 +92,7 @@ class PaymentStatus:
     paid: list[str]  # ссылки на профили
     unpaid: list[str]
     others_paid: list[str]  # отметили «Оплатил», но не «Буду (игрок)»
+    closed: bool  # сбор завершён: опрос закрыт, напоминаний нет
 
 
 class GamePaymentService:
@@ -347,6 +348,7 @@ class GamePaymentService:
                 return None
             players, paid = await _players_and_paid(uow, payment)
             others = [u for u in paid.values() if u.id not in players]
+            poll = await uow.polls.get_for_ref(PollType.GAME_PAYMENT, GAME_PAYMENT_REF, payment.id)
             collector = (
                 await uow.users.get(payment.collector_user_id)
                 if payment.collector_user_id
@@ -358,7 +360,34 @@ class GamePaymentService:
                 paid=[profile(u) for u in players.values() if u.id in paid],
                 unpaid=[profile(u) for u in players.values() if u.id not in paid],
                 others_paid=[profile(u) for u in others],
+                closed=poll is None or poll.closed_at is not None,
             )
+
+    async def close(
+        self, actor: UserContext, payment_id: int, *, now: datetime | None = None
+    ) -> bool:
+        """Завершить сбор: опрос «Оплатил» в группе закрывается, напоминаний больше нет.
+        False — сбор уже завершён."""
+        now = now or utcnow()
+        async with self._uow_factory() as uow:
+            payment = await uow.game_payments.get(payment_id)
+            if payment is None or payment.cancelled_at is not None:
+                raise NotFound(ru.GAME_PAYMENT_NOT_FOUND)
+            require(actor, payment.squad_id, Permission.GAME_PAYMENTS)
+            poll = await uow.polls.get_for_ref(PollType.GAME_PAYMENT, GAME_PAYMENT_REF, payment.id)
+            if poll is None or poll.closed_at is not None:
+                return False
+            poll.closed_at = now
+            await uow.system.audit(
+                actor_user_id=actor.user.id,
+                action="game_payment.close",
+                entity="event",
+                entity_id=payment.event_id,
+                payload={"payment_id": payment.id},
+            )
+            await uow.commit()
+        await self._notifier.stop_poll(poll.chat_id, poll.message_id)
+        return True
 
     async def remind_due(self, *, now: datetime | None = None) -> int:
         """Срок оплаты прошёл: игрокам без «Оплатил» — в личку (не дошло — в группу). Сколько
@@ -378,6 +407,11 @@ class GamePaymentService:
                     or payment.deadline_at is None
                     or match is None
                 ):
+                    continue
+                poll = await uow.polls.get_for_ref(
+                    PollType.GAME_PAYMENT, GAME_PAYMENT_REF, payment.id
+                )
+                if poll is None or poll.closed_at is not None:  # сбор завершён
                     continue
                 settings = await load_squad_settings(uow, payment.squad_id)
                 number = due_payment_reminder(

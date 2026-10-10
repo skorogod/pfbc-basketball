@@ -25,7 +25,14 @@ from pfbc_bot.bot.routers import (
 )
 from pfbc_bot.services.container import Services
 
-ALLOWED_UPDATES = ["message", "callback_query", "poll_answer", "chat_member", "my_chat_member"]
+ALLOWED_UPDATES = [
+    "message",
+    "callback_query",
+    "poll",
+    "poll_answer",
+    "chat_member",
+    "my_chat_member",
+]
 
 
 def create_dispatcher(
