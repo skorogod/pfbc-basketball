@@ -615,7 +615,7 @@ ROSTER_POST = (
 )
 ROSTER_NOTICE = (
     "🏀 <b>{title}</b>\n🗓 {when}\n\n«Буду (игрок)» отметили <b>{count}</b>.{hints}\n\n"
-    "<i>Число обновляется здесь же, обновлено {updated}</i>"
+    "<i>Количество игроков обновляется здесь же, обновлено {updated}</i>"
 )
 ROSTER_NOTICE_TOO_MANY = "В заявку войдут не больше {max} — выберете при начале сбора."
 ROSTER_NOTICE_SHORT = "До полного состава ({size}) не хватает {missing}."
