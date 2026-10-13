@@ -17,7 +17,7 @@ from pfbc_bot.services.container import Services
 from pfbc_bot.services.errors import Conflict, PermissionDenied
 
 from .conftest import ADMIN_TG_ID, FakeNotifier
-from .helpers import CHAT_ID, GAMES_THREAD, ctx_of, join, setup_squad
+from .helpers import CHAT_ID, MATCH_THREAD, ctx_of, join, setup_squad
 
 MSK = "Europe/Moscow"
 DAY = date(2026, 10, 12)
@@ -224,7 +224,7 @@ async def test_move_event_republishes_poll_and_reminders(
     moved = await services.events.move(coach, match_id, at(12, DAY + timedelta(days=2)), now=NOW)
     assert moved.posted and moved.poll_posted
     group = notifier.to(CHAT_ID)[-1]
-    assert group.thread_id == GAMES_THREAD and "Перенесено" in group.text
+    assert group.thread_id == MATCH_THREAD and "Перенесено" in group.text
     assert "12.10.2026 12:00" in group.text and "14.10.2026 12:00" in group.text
     assert (CHAT_ID, 1001) in notifier.stopped_polls  # старый опрос закрыт, новый — poll-2
     assert "14.10.2026" in notifier.polls[-1][1]

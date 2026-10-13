@@ -18,7 +18,7 @@ from pfbc_bot.services.events import ScheduleConflictError, format_event_line
 from pfbc_bot.texts import ru
 
 from .conftest import ADMIN_TG_ID, FakeNotifier
-from .helpers import CHAT_ID, GAMES_THREAD, ctx_of, join, setup_squad, tg
+from .helpers import CHAT_ID, MATCH_THREAD, ctx_of, join, setup_squad, tg
 
 MSK = "Europe/Moscow"
 DAY = date(2026, 10, 12)
@@ -155,7 +155,7 @@ async def test_publication_goes_to_matching_topic(
 
     posts = notifier.to(CHAT_ID)
     assert len(posts) == 1  # без флага публикации пост не делается
-    assert posts[0].thread_id == GAMES_THREAD
+    assert posts[0].thread_id == MATCH_THREAD
     assert "Товарищеская игра" in posts[0].text and "12:00–13:30" in posts[0].text
 
 
@@ -209,8 +209,8 @@ async def test_match_and_review_get_participation_poll(
     )
 
     assert [(chat, thread) for chat, _, thread in notifier.polls] == [
-        (CHAT_ID, GAMES_THREAD),
-        (CHAT_ID, GAMES_THREAD),
+        (CHAT_ID, MATCH_THREAD),
+        (CHAT_ID, MATCH_THREAD),
     ]
     assert "Матч: PFBC — Динамо, пн 12.10.2026 12:00. Будешь?" in notifier.polls[0][1]
     assert "Разбор игры: Разбор" in notifier.polls[1][1]

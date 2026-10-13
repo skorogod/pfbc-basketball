@@ -13,7 +13,7 @@ from pfbc_bot.services.container import Services
 from pfbc_bot.services.errors import Conflict, NotFound, PermissionDenied
 
 from .conftest import ADMIN_TG_ID, FakeNotifier
-from .helpers import CHAT_ID, GAMES_THREAD, ctx_of, join, setup_squad
+from .helpers import CHAT_ID, MATCH_THREAD, ctx_of, join, setup_squad
 
 MSK = "Europe/Moscow"
 DAY = date(2026, 10, 12)
@@ -73,11 +73,11 @@ async def test_payment_post_poll_and_reminders(
     )
 
     post = notifier.to(CHAT_ID)[-1]
-    assert post.thread_id == GAMES_THREAD
+    assert post.thread_id == MATCH_THREAD
     assert "PFBC — Динамо" in post.text and "ФОК" in post.text
     assert "Сумма: 2 500 ₽" in post.text and "+79991234567" in post.text
     assert "Оплатить до" in post.text
-    assert notifier.polls[-1] == (CHAT_ID, "💰 Оплата игры «PFBC — Динамо»: 2 500 ₽", GAMES_THREAD)
+    assert notifier.polls[-1] == (CHAT_ID, "💰 Оплата игры «PFBC — Динамо»: 2 500 ₽", MATCH_THREAD)
     assert [d.same_as(DETAILS) for d in await services.game_payments.details_of(coach.user.id)] == [
         True
     ]
@@ -155,7 +155,7 @@ async def test_reminder_in_group_when_dm_closed(
     notifier.blocked_dm = {2}
     assert await services.game_payments.remind_due(now=NOW + timedelta(hours=3)) == 1
     group = notifier.to(CHAT_ID)[-1]
-    assert group.thread_id == GAMES_THREAD
+    assert group.thread_id == MATCH_THREAD
     # в группе — только тот, кому не дошло личное сообщение
     assert '<a href="tg://user?id=2">user2</a>' in group.text and "user1" not in group.text
     assert "Напоминание об оплате" in notifier.to(1)[-1].text

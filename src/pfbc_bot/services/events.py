@@ -98,10 +98,10 @@ def event_permission(event_type: EventType) -> Permission:
 
 
 def event_topic(event_type: EventType) -> TopicPurpose:
-    """Топик группы для поста и напоминаний: игровые события — в «Игры», собрания — в
+    """Топик группы для поста и напоминаний: игровые события — в match, собрания — в
     teambuilding, остальные — в общий (нет своего топика — тоже в общий)."""
     if event_type in GAME_EVENT_TYPES:
-        return TopicPurpose.GAMES
+        return TopicPurpose.MATCH
     if event_type == EventType.MEETING:
         return TopicPurpose.TEAMBUILDING
     return TopicPurpose.GENERAL

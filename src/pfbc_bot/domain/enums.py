@@ -28,7 +28,7 @@ STAFF_ROLES: frozenset[SquadRole] = frozenset({SquadRole.CAPTAIN, SquadRole.COAC
 class TopicPurpose(StrEnum):
     GENERAL = "general"
     TRAININGS = "trainings"
-    GAMES = "games"
+    MATCH = "match"  # матчи: опрос участия и сбор денег за игру
     GREETINGS = "greetings"
     PAYMENTS = "payments"
     TEAMBUILDING = "teambuilding"  # собрания команды

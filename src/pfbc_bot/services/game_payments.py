@@ -2,7 +2,7 @@
 
 Это не оплата тренировок по квитанциям mos.ru (ФТ-8) — другой процесс и другие таблицы.
 Платят ответившие «Буду (игрок)» в опросе участия в матче: после дедлайна каждому, кто не
-отметил «Оплатил», бот пишет в личку, а не дошедших — упоминает в группе (топик «Игры»).
+отметил «Оплатил», бот пишет в личку, а не дошедших — упоминает в группе (топик match).
 Сколько раз и с каким интервалом — настройки состава; с 00:00 до 08:00 не напоминает.
 """
 
@@ -186,7 +186,7 @@ class GamePaymentService:
     async def create(
         self, actor: UserContext, data: GamePaymentCreate, *, now: datetime | None = None
     ) -> GamePaymentDTO:
-        """Пост в топике «Игры»: игра, сумма, получатель и его реквизиты, срок — и опрос
+        """Пост в топике match: игра, сумма, получатель и его реквизиты, срок — и опрос
         «Оплатил». Прежний сбор по этой игре и голосование участия в ней закрываются (платят
         ответившие «Буду (игрок)» — состав больше не меняется). Реквизиты запоминаются у получателя.
 
@@ -198,7 +198,7 @@ class GamePaymentService:
             raise Conflict(ru.PAST_DATE)
         async with self._uow_factory() as uow:
             match = await self._match(uow, actor, data.match_event_id)
-            destination = await resolve_destination(uow, match.squad_id, TopicPurpose.GAMES)
+            destination = await resolve_destination(uow, match.squad_id, TopicPurpose.MATCH)
             if destination is None:
                 raise Conflict(ru.POLL_NO_CHAT)
             collector = await self._collector(uow, actor, match.squad_id, data.collector_user_id)
@@ -535,7 +535,7 @@ class GamePaymentService:
                 uow,
                 self._notifier,
                 payment.squad_id,
-                TopicPurpose.GAMES,
+                TopicPurpose.MATCH,
                 ru.GAME_PAYMENT_REMINDER_GROUP.format(
                     names=", ".join(mention(u) for u in not_reached),
                     event=_event_line(event, tz),

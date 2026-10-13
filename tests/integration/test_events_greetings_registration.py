@@ -13,7 +13,7 @@ from pfbc_bot.services.container import Services
 from pfbc_bot.services.errors import PermissionDenied
 
 from .conftest import FakeNotifier
-from .helpers import CHAT_ID, GAMES_THREAD, GREETINGS_THREAD, ctx_of, join, setup_squad
+from .helpers import CHAT_ID, GREETINGS_THREAD, MATCH_THREAD, ctx_of, join, setup_squad
 
 MSK = "Europe/Moscow"
 LONG_AGO = datetime(2026, 1, 1, tzinfo=UTC)
@@ -65,9 +65,9 @@ async def test_event_reminders_3_1_0_days_exactly_once(
     # напоминания о турнире — тем, кто ведёт игры и турниры (тренер); капитану — нет
     assert len(notifier.to(COACH)) == 3 and len(notifier.to(CAPTAIN)) == 0
     assert len(notifier.to(1)) == 0  # игрокам — только через группу
-    # в группе: пост о турнире при создании + 3 напоминания, всё в топике «Игры»
+    # в группе: пост о турнире при создании + 3 напоминания, всё в топике match
     group = notifier.to(CHAT_ID)
-    assert len(group) == 4 and all(m.thread_id == GAMES_THREAD for m in group)
+    assert len(group) == 4 and all(m.thread_id == MATCH_THREAD for m in group)
     period = f"{event_day:%d.%m.%Y} – {event_day + timedelta(days=1):%d.%m.%Y} (2 дн.)"
     assert "Турнир памяти" in group[0].text and period in group[0].text
     assert "завтра" in notifier.to(COACH)[1].text

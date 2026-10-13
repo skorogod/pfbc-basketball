@@ -12,7 +12,7 @@ from .conftest import ADMIN_TG_ID
 CHAT_ID = -100500
 TRAININGS_THREAD = 7
 GREETINGS_THREAD = 9
-GAMES_THREAD = 11
+MATCH_THREAD = 11
 
 
 def tg(tg_id: int, name: str | None = None) -> TelegramUser:
@@ -30,7 +30,7 @@ async def setup_squad(services: Services, name: str = "Взрослые") -> Squ
     squad = await services.squads.bind_chat(admin, CHAT_ID, "PFBC Взрослые", name)
     await services.squads.bind_topic(admin, CHAT_ID, TopicPurpose.TRAININGS, TRAININGS_THREAD)
     await services.squads.bind_topic(admin, CHAT_ID, TopicPurpose.GREETINGS, GREETINGS_THREAD)
-    await services.squads.bind_topic(admin, CHAT_ID, TopicPurpose.GAMES, GAMES_THREAD)
+    await services.squads.bind_topic(admin, CHAT_ID, TopicPurpose.MATCH, MATCH_THREAD)
     return squad
 
 
