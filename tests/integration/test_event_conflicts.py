@@ -523,3 +523,70 @@ async def test_tournament_game_price(services: Services, squad_id: int) -> None:
         await services.events.set_game_price(await ctx_of(services, PLAYER), cup.id, None)
     with pytest.raises(ValueError, match="только у турнира"):
         event(squad_id, at(9), type=EventType.MATCH, title="x", game_price=Decimal("1"))
+
+
+async def test_event_post_is_pinned_and_unpinned(
+    services: Services, squad_id: int, notifier: FakeNotifier, uow_factory: UowFactory
+) -> None:
+    """Пост о событии (не опрос) тихо закрепляется; закреп снимается при переносе (закрепляется
+    пост о переносе), при удалении и после окончания события."""
+    actor = await captain(services)
+    match = await services.events.create(
+        actor,
+        event(squad_id, at(12), 90, type=EventType.MATCH, title="PFBC — Динамо", notify_group=True),
+        now=NOW,
+    )
+    await services.events.create(actor, event(squad_id, at(9), 30, title="Тихое"), now=NOW)
+    announcement = notifier.to(CHAT_ID)[0]
+    assert notifier.pinned == [(CHAT_ID, announcement.message_id)]  # опрос не закрепляется
+    async with uow_factory() as uow:
+        stored = await uow.events.get(match.id)
+        assert stored is not None
+        assert (stored.pinned_chat_id, stored.pinned_message_id) == (
+            CHAT_ID,
+            announcement.message_id,
+        )
+
+    # перенос: старый пост откреплён, закреплён пост о переносе
+    await services.events.move(actor, match.id, at(14), now=NOW)
+    moved = notifier.to(CHAT_ID)[-1]
+    assert notifier.unpinned == [(CHAT_ID, announcement.message_id)]
+    assert notifier.pinned[-1] == (CHAT_ID, moved.message_id)
+
+    # до окончания (14:00–15:30) — не трогается, после — откреплён один раз
+    assert await services.events.unpin_ended(now=at(15)) == 0
+    assert await services.events.unpin_ended(now=at(16)) == 1
+    assert notifier.unpinned[-1] == (CHAT_ID, moved.message_id)
+    assert await services.events.unpin_ended(now=at(17)) == 0
+
+    # удаление — открепляет
+    meeting = await services.events.create(
+        actor, event(squad_id, at(10), 30, title="Сбор", notify_group=True), now=NOW
+    )
+    post = notifier.pinned[-1]
+    await services.events.delete(actor, meeting.id, now=NOW)
+    assert notifier.unpinned[-1] == post
+    async with uow_factory() as uow:
+        assert await uow.events.list_pinned_started(at(23)) == []
+
+
+async def test_season_tournament_stays_pinned(
+    services: Services, squad_id: int, notifier: FakeNotifier
+) -> None:
+    """Сезон без известного конца по времени не открепляется."""
+    actor = await captain(services)
+    await services.events.create(
+        actor,
+        event(
+            squad_id,
+            at(0),
+            type=EventType.TOURNAMENT,
+            title="ABL",
+            is_season=True,
+            notify_group=True,
+        ),
+        now=at(0) - timedelta(days=1),
+    )
+    assert len(notifier.pinned) == 1
+    assert await services.events.unpin_ended(now=at(12) + timedelta(days=60)) == 0
+    assert notifier.unpinned == []

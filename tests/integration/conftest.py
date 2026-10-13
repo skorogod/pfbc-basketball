@@ -59,6 +59,8 @@ class FakeNotifier:
     fail_edits: set[int] = field(default_factory=set)
     stopped_polls: list[tuple[int, int]] = field(default_factory=list)
     deleted: list[tuple[int, int]] = field(default_factory=list)
+    pinned: list[tuple[int, int]] = field(default_factory=list)
+    unpinned: list[tuple[int, int]] = field(default_factory=list)
     # send_poll с этим порядковым номером не доставлен
     fail_polls_on: set[int] = field(default_factory=set)
     # отправка с этим порядковым номером не доставлена (notifier вернул None)
@@ -109,6 +111,14 @@ class FakeNotifier:
 
     async def stop_poll(self, chat_id: int, message_id: int) -> bool:
         self.stopped_polls.append((chat_id, message_id))
+        return True
+
+    async def pin_message(self, chat_id: int, message_id: int) -> bool:
+        self.pinned.append((chat_id, message_id))
+        return True
+
+    async def unpin_message(self, chat_id: int, message_id: int) -> bool:
+        self.unpinned.append((chat_id, message_id))
         return True
 
     async def is_chat_member(self, chat_id: int, tg_user_id: int) -> bool | None:

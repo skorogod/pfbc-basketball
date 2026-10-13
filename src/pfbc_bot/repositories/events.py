@@ -55,6 +55,16 @@ class EventsRepository:
             stmt = stmt.where(Event.squad_id.in_(list(squad_ids)))
         return list(await self._session.scalars(stmt.order_by(Event.starts_at)))
 
+    async def list_pinned_started(self, now: datetime) -> list[Event]:
+        """События с закреплённым постом, которые уже начались, — кандидаты на открепление
+        (закончилось ли событие, решает сервис)."""
+        stmt = select(Event).where(
+            Event.deleted_at.is_(None),
+            Event.pinned_message_id.is_not(None),
+            Event.starts_at <= now,
+        )
+        return list(await self._session.scalars(stmt.order_by(Event.starts_at)))
+
     async def list_of_type(
         self,
         event_type: EventType,

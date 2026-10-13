@@ -364,6 +364,7 @@ class EventService:
             poll = await self._active_poll(uow, event)
             if poll is not None:
                 await uow.polls.supersede(poll, now)
+            old_pin = _take_pin(event)  # старый пост с прежним временем — открепляется
             await uow.system.release_reminders(f"event:{event.id}:")
             tz = squad_tz(await uow.squads.get(event.squad_id))
             [dto] = await to_dtos(uow, [event])
@@ -381,6 +382,8 @@ class EventService:
             await uow.commit()
         if poll is not None and poll.closed_at is None:  # закрытый уже остановлен в Telegram
             await self._notifier.stop_poll(poll.chat_id, poll.message_id)
+        if old_pin is not None:
+            await self._notifier.unpin_message(*old_pin)
         if not dto.notify_group:
             return dto
         if destination is None:
@@ -394,12 +397,7 @@ class EventService:
             place=f"\n📍 {html.escape(dto.place)}" if dto.place else "",
             tournament=_tournament_line(dto),
         )
-        posted = (
-            await self._notifier.send_message(
-                destination.chat_id, text, thread_id=destination.thread_id
-            )
-            is not None
-        )
+        posted = await self._post_pinned(dto, destination, text)
         poll_posted = (
             await self._publish_poll(dto, tz, destination) if dto.type in EVENT_POLLS else None
         )
@@ -410,16 +408,49 @@ class EventService:
         пользователь узнал, если что-то не дошло (бота удалили из группы и т.п.)."""
         if destination is None:
             return dto.model_copy(update={"posted": False})
-        posted = (
-            await self._notifier.send_message(
-                destination.chat_id, format_announcement(dto, tz), thread_id=destination.thread_id
-            )
-            is not None
-        )
+        posted = await self._post_pinned(dto, destination, format_announcement(dto, tz))
         poll_posted = (
             await self._publish_poll(dto, tz, destination) if dto.type in EVENT_POLLS else None
         )
         return dto.model_copy(update={"posted": posted, "poll_posted": poll_posted})
+
+    async def _post_pinned(self, dto: EventDTO, destination: Destination, text: str) -> bool:
+        """Пост о событии (анонс или перенос) — с тихим закрепом, чтобы информация о нём
+        была под рукой, а не терялась за опросом участия. Закреп снимается при переносе,
+        удалении и после окончания события (unpin_ended)."""
+        message_id = await self._notifier.send_message(
+            destination.chat_id, text, thread_id=destination.thread_id
+        )
+        if message_id is None:
+            return False
+        if await self._notifier.pin_message(destination.chat_id, message_id):
+            async with self._uow_factory() as uow:
+                event = await uow.events.get(dto.id)
+                if event is not None:
+                    event.pinned_chat_id = destination.chat_id
+                    event.pinned_message_id = message_id
+                    await uow.commit()
+        return True
+
+    async def unpin_ended(self, *, now: datetime | None = None) -> int:
+        """Тик: снимает закреп с постов о закончившихся событиях. Сезонный турнир (конец
+        неизвестен) открепляется только при удалении."""
+        now = now or utcnow()
+        async with self._uow_factory() as uow:
+            pins: list[tuple[int, int]] = []
+            for event in await uow.events.list_pinned_started(now):
+                [dto] = await to_dtos(uow, [event])
+                if dto.ends_at is None or dto.ends_at > now:
+                    continue
+                pin = _take_pin(event)
+                if pin is not None:
+                    pins.append(pin)
+            await uow.commit()  # отметка — до запросов в Telegram: сбой не приведёт к повтору
+        for pin in pins:
+            await self._notifier.unpin_message(*pin)
+        if pins:
+            log.info("event_pins_removed", count=len(pins))
+        return len(pins)
 
     async def create_from_match(
         self,
@@ -521,6 +552,7 @@ class EventService:
             for poll in polls:
                 if poll is not None:
                     await uow.polls.supersede(poll, now)
+            pin = _take_pin(event)
             await uow.system.audit(
                 actor_user_id=actor.user.id,
                 action="event.delete",
@@ -531,6 +563,8 @@ class EventService:
             for poll in polls:
                 if poll is not None and poll.closed_at is None:
                     await self._notifier.stop_poll(poll.chat_id, poll.message_id)
+            if pin is not None:
+                await self._notifier.unpin_message(*pin)
             [dto] = await to_dtos(uow, [event])
             if _is_over(dto, now):
                 return
@@ -955,3 +989,13 @@ def _is_over(event: EventDTO, now: datetime) -> bool:
     if event.type == EventType.TOURNAMENT:
         return event.ends_at is not None and event.ends_at <= now
     return event.starts_at is not None and event.starts_at <= now
+
+
+def _take_pin(event: Event) -> tuple[int, int] | None:
+    """Забирает закреп события (chat_id, message_id) и обнуляет его — вызывается в транзакции,
+    открепление в Telegram — после commit."""
+    if event.pinned_chat_id is None or event.pinned_message_id is None:
+        return None
+    pin = (event.pinned_chat_id, event.pinned_message_id)
+    event.pinned_chat_id = event.pinned_message_id = None
+    return pin

@@ -1,7 +1,17 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Numeric, String, Text, false, text
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Numeric,
+    String,
+    Text,
+    false,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pfbc_bot.db.base import Base, CreatedAtMixin, IdMixin, str_enum
@@ -43,4 +53,7 @@ class Event(IdMixin, CreatedAtMixin, Base):
     created_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
+    # закреплённый пост о событии в группе; None — закрепа нет (снят или не удался)
+    pinned_chat_id: Mapped[int | None] = mapped_column(BigInteger)
+    pinned_message_id: Mapped[int | None]
     deleted_at: Mapped[datetime | None]

@@ -68,6 +68,14 @@ class Notifier(Protocol):
         """Закрывает опрос бота: голосовать в нём больше нельзя."""
         ...
 
+    async def pin_message(self, chat_id: int, message_id: int) -> bool:
+        """Тихо (без уведомления) закрепляет сообщение. Нужно право «Закреплять сообщения»."""
+        ...
+
+    async def unpin_message(self, chat_id: int, message_id: int) -> bool:
+        """Снимает закреп с сообщения."""
+        ...
+
     async def is_chat_member(self, chat_id: int, tg_user_id: int) -> bool | None:
         """True/False — состоит ли пользователь в чате; None — проверить не удалось."""
         ...

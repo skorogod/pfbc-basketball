@@ -185,6 +185,24 @@ class TelegramNotifier:
             return False
         return True
 
+    async def pin_message(self, chat_id: int, message_id: int) -> bool:
+        try:
+            await self._call(
+                lambda: self._bot.pin_chat_message(chat_id, message_id, disable_notification=True)
+            )
+        except TelegramAPIError as exc:  # нет права «Закреплять сообщения» и т.п.
+            log.info("telegram_pin_failed", chat_id=chat_id, error=str(exc))
+            return False
+        return True
+
+    async def unpin_message(self, chat_id: int, message_id: int) -> bool:
+        try:
+            await self._call(lambda: self._bot.unpin_chat_message(chat_id, message_id=message_id))
+        except TelegramAPIError as exc:
+            log.info("telegram_unpin_failed", chat_id=chat_id, error=str(exc))
+            return False
+        return True
+
     async def is_chat_member(self, chat_id: int, tg_user_id: int) -> bool | None:
         try:
             member = await self._call(lambda: self._bot.get_chat_member(chat_id, tg_user_id))
