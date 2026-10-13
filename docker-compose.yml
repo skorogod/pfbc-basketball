@@ -42,7 +42,7 @@ services:
     command: ["python", "-m", "pfbc_bot.main"]
     environment:
       DATABASE_URL: *database_url
-      BOT_MODE: ${BOT_MODE:-pooling}
+      BOT_MODE: ${BOT_MODE:-polling}
       WEB_PORT: ${WEB_PORT:-8080}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${WEB_PORT:-8080}/healthz')"]
