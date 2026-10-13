@@ -115,6 +115,16 @@ EVENT_TYPE_TITLES: dict[EventType, str] = {
     EventType.OTHER: "Прочее",
 }
 
+# заголовок события в постах и списках
+EVENT_TYPE_EMOJI: dict[EventType, str] = {
+    EventType.MATCH: "🏀",
+    EventType.REVIEW: "🎬",
+    EventType.CAMP: "⛺",
+    EventType.TOURNAMENT: "🏆",
+    EventType.MEETING: "🕺",
+    EventType.OTHER: "📌",
+}
+
 ROLE_TITLES: dict[SquadRole, str] = {
     SquadRole.PLAYER: "игрок",
     SquadRole.CAPTAIN: "капитан",

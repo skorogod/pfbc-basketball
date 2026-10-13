@@ -21,6 +21,7 @@ from pfbc_bot.domain.dates import (
 )
 from pfbc_bot.domain.enums import (
     EVENT_POLL_OPTIONS,
+    EVENT_TYPE_EMOJI,
     EVENT_TYPE_TITLES,
     MATCH_DURATION_MINUTES,
     MATCH_POLL_OPTIONS,
@@ -165,20 +166,23 @@ def _tournament_line(event: EventDTO) -> str:
     return "\n" + ru.EVENT_TOURNAMENT.format(title=html.escape(event.tournament_title))
 
 
-def format_event_line(event: EventDTO, squad_name: str, tz: str) -> str:
-    place = f", {html.escape(event.place)}" if event.place else ""
-    tournament = f" · 🏆 {html.escape(event.tournament_title)}" if event.tournament_title else ""
-    return ru.EVENT_LINE.format(
-        when=format_when(event, tz),
-        title=html.escape(event.title),
+def format_event_line(event: EventDTO, tz: str, squad_name: str | None = None) -> str:
+    """Карточка события — как пост о нём, без описания. squad_name — строка «👥 состав»
+    (когда событий нескольких составов)."""
+    return ru.EVENT_CARD.format(
+        emoji=EVENT_TYPE_EMOJI[event.type],
         type=EVENT_TYPE_TITLES[event.type],
-        squad=html.escape(squad_name),
-        place=place + tournament,
+        title=html.escape(event.title),
+        when=format_when(event, tz),
+        place=f"\n📍 {html.escape(event.place)}" if event.place else "",
+        tournament=_tournament_line(event),
+        squad=f"\n👥 {html.escape(squad_name)}" if squad_name else "",
     )
 
 
 def format_announcement(event: EventDTO, tz: str) -> str:
     return ru.EVENT_ANNOUNCE.format(
+        emoji=EVENT_TYPE_EMOJI[event.type],
         type=EVENT_TYPE_TITLES[event.type],
         title=html.escape(event.title),
         when=format_when(event, tz),
@@ -496,7 +500,7 @@ class EventService:
     async def update_from_match(
         self, event_id: int, starts_at: datetime, place: str | None, *, now: datetime | None = None
     ) -> EventDTO | None:
-        """Матч изменился в источнике. Другое время — перенос, как /event_move (сообщение
+        """Матч изменился в источнике. Другое время — перенос, как кнопкой в /events (сообщение
         и новый опрос); только другое место — сообщение в топике. Прошедшее событие и
         событие без изменений не трогаются (None)."""
         now = now or utcnow()
@@ -899,7 +903,7 @@ class EventService:
                 await uow.commit()
                 [dto] = await to_dtos(uow, [match])
                 text = ru.REVIEW_OFFER.format(
-                    match=format_event_line(dto, squad.name, squad.timezone)
+                    match=format_event_line(dto, squad.timezone, squad.name)
                 )
                 keyboard = [
                     [

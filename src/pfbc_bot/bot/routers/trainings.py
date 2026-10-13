@@ -1,6 +1,7 @@
 """Расписание и тренировки (ФТ-2): /schedule, /trainings, /training_add, /poll, /attendance."""
 
 import html
+from datetime import timedelta
 
 from aiogram import F, Router
 from aiogram.enums import ChatType
@@ -14,6 +15,7 @@ from pfbc_bot.bot.keyboards.common import ItemAction, SquadPick, confirm_markup
 from pfbc_bot.bot.states import ScheduleEdit, TrainingEdit
 from pfbc_bot.domain.dates import (
     WEEKDAY_SHORT,
+    format_interval,
     format_local,
     localize,
     parse_local_datetime,
@@ -35,6 +37,7 @@ router.message.filter(F.chat.type == ChatType.PRIVATE)
 
 SCHEDULE, TRAININGS, TRAINING_ADD, ATTENDANCE = "schedule", "trainings", "tr_add", "attendance"
 POLL = "poll"
+TRAININGS_SHOWN = 2  # /trainings: столько ближайших тренировок с кнопками
 
 
 # --- вход в сценарии: команда или выбор состава ---
@@ -190,27 +193,36 @@ async def on_schedule_line(
 
 # --- ближайшие тренировки: отмена и перенос ---
 async def show_trainings(message: Message, squad: SquadDTO, services: Services) -> None:
-    trainings = await services.trainings.upcoming(squad.id)
+    """Ближайшие тренировки — каждая отдельным сообщением с кнопками «Перенести» и «Отменить»
+    (обе через подтверждение)."""
+    trainings = (await services.trainings.upcoming(squad.id))[:TRAININGS_SHOWN]
     if not trainings:
         await message.answer(ru.TRAININGS_EMPTY)
         return
-    builder = InlineKeyboardBuilder()
-    lines = [ru.TRAININGS_HEADER.format(squad=html.escape(squad.name))]
+    await message.answer(ru.TRAININGS_HEADER.format(squad=html.escape(squad.name)))
     for t in trainings:
-        when = format_local(t.starts_at, squad.timezone)
-        lines.append(f"• {when} — {html.escape(t.venue)}")
+        builder = InlineKeyboardBuilder()
         builder.button(
-            text=f"❌ {when}", callback_data=ItemAction(kind="tr", action="cancel", item_id=t.id)
+            text=ru.TRAINING_BTN_MOVE,
+            callback_data=ItemAction(kind="tr", action="move_ask", item_id=t.id),
         )
         builder.button(
-            text="🔁 Перенести", callback_data=ItemAction(kind="tr", action="move", item_id=t.id)
+            text=ru.TRAINING_BTN_CANCEL,
+            callback_data=ItemAction(kind="tr", action="cancel", item_id=t.id),
         )
-    builder.adjust(2)
-    await message.answer("\n".join(lines), reply_markup=builder.as_markup())
+        builder.adjust(2)
+        end = t.starts_at + timedelta(minutes=t.duration_minutes)
+        await message.answer(
+            ru.TRAINING_CARD.format(
+                when=format_interval(t.starts_at, end, squad.timezone),
+                venue=html.escape(t.venue),
+            ),
+            reply_markup=builder.as_markup(),
+        )
 
 
 @router.callback_query(
-    ItemAction.filter((F.kind == "tr") & F.action.in_({"cancel", "cancel_ok", "move"}))
+    ItemAction.filter((F.kind == "tr") & F.action.in_({"cancel", "cancel_ok", "move_ask", "move"}))
 )
 async def on_training_action(
     callback: CallbackQuery,
@@ -237,11 +249,20 @@ async def on_training_action(
     elif callback_data.action == "cancel_ok":  # шаг 2: подтверждено
         await services.trainings.cancel(ctx, callback_data.item_id)
         await message.edit_text(ru.TRAINING_DONE, reply_markup=None)
-    else:
-        await services.trainings.get(ctx, callback_data.item_id)  # перенос — с правом сразу
+    elif callback_data.action == "move_ask":  # шаг 1: вопрос — ничего не меняет
+        training = await services.trainings.get(ctx, callback_data.item_id)
+        squad = await services.squads.get(training.squad_id)
+        await message.answer(
+            ru.TRAINING_CONFIRM_MOVE.format(when=format_local(training.starts_at, squad.timezone)),
+            reply_markup=confirm_markup(
+                "tr", "move", callback_data.item_id, ru.TRAINING_BTN_CONFIRM_MOVE
+            ),
+        )
+    else:  # шаг 2: подтверждено — вопрос заменяется запросом нового времени
+        await services.trainings.get(ctx, callback_data.item_id)  # проверка права
         await state.set_state(TrainingEdit.move)
         await state.update_data(training_id=callback_data.item_id)
-        await message.answer(ru.TRAINING_MOVE_PROMPT)
+        await message.edit_text(ru.TRAINING_MOVE_PROMPT, reply_markup=None)
 
 
 @router.message(TrainingEdit.move, F.text)

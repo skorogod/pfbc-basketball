@@ -1,4 +1,5 @@
-"""Журнал событий (ФТ-9): /events, /event_add, /event_del, /review, /tournaments."""
+"""Журнал событий (ФТ-9): /events (перенос и отмена — кнопками у события), /event_add, /review,
+/tournaments."""
 
 import html
 from datetime import UTC, datetime, time, timedelta
@@ -25,6 +26,7 @@ from pfbc_bot.bot.keyboards.common import (
     ItemAction,
     SquadPick,
     choices_keyboard,
+    confirm_markup,
     skip_keyboard,
     yes_no_keyboard,
 )
@@ -89,46 +91,65 @@ class TournamentLink(CallbackData, prefix="tl"):
 
 @router.message(Command("events"))
 async def cmd_events(message: Message, ctx: UserContext, services: Services) -> None:
+    """Каждое событие — отдельным сообщением; у тех, которыми можно управлять (право на тип), —
+    кнопки «Перенести» и «Отменить», обе через подтверждение."""
     squad_ids = [s.id for s in await available_squads(ctx, services)]
     events = await services.events.upcoming(squad_ids)
     if not events:
         await message.answer(ru.EVENTS_EMPTY)
         return
-    lines = [ru.EVENTS_HEADER, *(format_event_line(e, name, tz) for e, name, tz in events)]
-    await message.answer("\n".join(lines))
-
-
-@router.message(Command("event_del"))
-async def cmd_event_del(message: Message, ctx: UserContext, services: Services) -> None:
-    events = await _manageable_events(ctx, services)  # только те, что можно удалить
-    if not events:
-        await message.answer(ru.EVENTS_EMPTY)
-        return
-    builder = InlineKeyboardBuilder()
+    await message.answer(ru.EVENTS_HEADER)
+    # состав — только если в списке события нескольких составов
+    several = len({name for _, name, _ in events}) > 1
     for event, squad_name, tz in events:
-        when = format_short(event, tz)
-        builder.button(
-            text=f"🗑 {when} {event.title} ({squad_name})"[:60],
-            callback_data=ItemAction(kind="ev", action="del", item_id=event.id),
+        manageable = ctx.can(event.squad_id, event_permission(event.type))
+        await message.answer(
+            format_event_line(event, tz, squad_name if several else None),
+            reply_markup=_event_keyboard(event.id) if manageable else None,
         )
-    builder.adjust(1)
-    await message.answer(ru.EVENTS_HEADER, reply_markup=builder.as_markup())
 
 
-@router.message(Command("event_move"))
-async def cmd_event_move(message: Message, ctx: UserContext, services: Services) -> None:
-    events = await _manageable_events(ctx, services)
-    if not events:
-        await message.answer(ru.EVENTS_EMPTY)
-        return
+def _event_keyboard(event_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for event, squad_name, tz in events:
-        builder.button(
-            text=f"🔁 {format_short(event, tz)} {event.title} ({squad_name})"[:60],
-            callback_data=ItemAction(kind="ev", action="move", item_id=event.id),
+    builder.button(
+        text=ru.EVENT_BTN_MOVE,
+        callback_data=ItemAction(kind="ev", action="move_ask", item_id=event_id),
+    )
+    builder.button(
+        text=ru.EVENT_BTN_CANCEL,
+        callback_data=ItemAction(kind="ev", action="del_ask", item_id=event_id),
+    )
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+@router.callback_query(ItemAction.filter((F.kind == "ev") & F.action.in_({"move_ask", "del_ask"})))
+async def on_event_action_ask(
+    callback: CallbackQuery, callback_data: ItemAction, ctx: UserContext, services: Services
+) -> None:
+    """Шаг 1: вопрос «точно?» — ничего не меняет. Подтверждение — move / del."""
+    event = await services.events.get(callback_data.item_id)
+    if not ctx.can(event.squad_id, event_permission(event.type)):
+        await callback.answer(ru.NO_PERMISSION, show_alert=True)
+        return
+    await callback.answer()
+    squad = await services.squads.get(event.squad_id)
+    move = callback_data.action == "move_ask"
+    question = ru.EVENT_CONFIRM_MOVE if move else ru.EVENT_CONFIRM_CANCEL
+    if message := callback_message(callback):
+        await message.answer(
+            question.format(
+                type=EVENT_TYPE_TITLES[event.type],
+                title=html.escape(event.title),
+                when=format_when(event, squad.timezone),
+            ),
+            reply_markup=confirm_markup(
+                "ev",
+                "move" if move else "del",
+                event.id,
+                ru.EVENT_BTN_CONFIRM_MOVE if move else ru.EVENT_BTN_CONFIRM_CANCEL,
+            ),
         )
-    builder.adjust(1)
-    await message.answer(ru.EVENT_MOVE_CHOOSE, reply_markup=builder.as_markup())
 
 
 @router.callback_query(ItemAction.filter((F.kind == "ev") & (F.action == "move")))
@@ -147,9 +168,11 @@ async def on_event_move_pick(
     squad = await services.squads.get(event.squad_id)
     await state.set_state(EventMove.when)
     await state.update_data(event_id=event.id, tz=squad.timezone, type=event.type.value)
-    if message := callback_message(callback):
+    if message := callback_message(callback):  # вопрос «точно?» заменяется запросом времени
         tournament = event.type == EventType.TOURNAMENT
-        await message.answer(ru.EVENT_MOVE_ASK_DATE if tournament else ru.EVENT_MOVE_ASK_WHEN)
+        await message.edit_text(
+            ru.EVENT_MOVE_ASK_DATE if tournament else ru.EVENT_MOVE_ASK_WHEN, reply_markup=None
+        )
 
 
 @router.message(EventMove.when, F.text)
@@ -175,24 +198,15 @@ async def on_event_move_when(
     await message.answer(text)
 
 
-async def _manageable_events(
-    ctx: UserContext, services: Services
-) -> list[tuple[EventDTO, str, str]]:
-    """Ближайшие события, которыми пользователь может управлять (по праву на тип)."""
-    squad_ids = [s.id for s in await available_squads(ctx, services, *EVENT_PERMISSIONS)]
-    return [
-        item
-        for item in await services.events.upcoming(squad_ids)
-        if ctx.can(item[0].squad_id, event_permission(item[0].type))
-    ]
-
-
 @router.callback_query(ItemAction.filter((F.kind == "ev") & (F.action == "del")))
 async def on_event_delete(
     callback: CallbackQuery, callback_data: ItemAction, ctx: UserContext, services: Services
 ) -> None:
+    """Шаг 2: отмена подтверждена (права проверяет сервис)."""
     await services.events.delete(ctx, callback_data.item_id)
-    await callback.answer(ru.EVENT_DELETED, show_alert=True)
+    await callback.answer()
+    if message := callback_message(callback):
+        await message.edit_text(ru.EVENT_DELETED, reply_markup=None)
 
 
 # --- создание события ---
@@ -753,7 +767,7 @@ async def _create(
         await _warn_conflicts(message, state, exc.conflicts, exc.tz, final=True)
         return
     squad = await services.squads.get(event.squad_id)
-    text = ru.EVENT_CREATED.format(event=format_event_line(event, squad.name, squad.timezone))
+    text = ru.EVENT_CREATED.format(event=format_event_line(event, squad.timezone))
     if event.notify_group:
         text += "\n" + publication_note(event)
     await message.answer(text)

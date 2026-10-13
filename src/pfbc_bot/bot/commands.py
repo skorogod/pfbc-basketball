@@ -28,13 +28,9 @@ COMMANDS_BY_PERMISSION: dict[Permission, list[BotCommand]] = {
     Permission.DUTY: [BotCommand(command="duty", description="Дежурные: замена и выбор")],
     Permission.MEETINGS: [
         BotCommand(command="event_add", description="Добавить событие"),
-        BotCommand(command="event_move", description="Перенести событие"),
-        BotCommand(command="event_del", description="Удалить событие"),
     ],
     Permission.EVENTS: [
         BotCommand(command="event_add", description="Добавить событие"),
-        BotCommand(command="event_move", description="Перенести событие"),
-        BotCommand(command="event_del", description="Удалить событие"),
         BotCommand(command="review", description="Назначить разбор игры"),
         BotCommand(command="tournaments", description="Турниры: матчи и стоимость игры"),
     ],

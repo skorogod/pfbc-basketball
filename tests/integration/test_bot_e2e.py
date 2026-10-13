@@ -30,6 +30,7 @@ from aiogram.types import (
     ChatMemberLeft,
     ChatMemberMember,
     ChatMemberUpdated,
+    InlineKeyboardMarkup,
     Message,
     Update,
     User,
@@ -454,6 +455,60 @@ async def test_training_cancel_needs_confirmation(
     )
     assert (await services.trainings.get(staff, training.id)).status == TrainingStatus.CANCELLED
     assert any("отменена" in m.text for m in notifier.to(GROUP_ID))
+
+
+async def test_trainings_list_two_nearest_with_buttons(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """/trainings: две ближайшие тренировки, каждая отдельным сообщением с кнопками
+    «Перенести» и «Отменить»; перенос — через подтверждение."""
+    await bind(harness)
+    await harness.member(COACH, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach = await ctx_of(services, COACH)
+    await services.squads.set_role(admin, squad.id, coach.user.id, SquadRole.COACH, grant=True)
+    coach = await ctx_of(services, COACH)
+    start = datetime.now(UTC).replace(second=0, microsecond=0) + timedelta(days=1)
+    trainings = [
+        await services.trainings.add_one_off(
+            coach,
+            TrainingCreate(
+                squad_id=squad.id, starts_at=start + timedelta(days=d), venue=f"Зал {d}"
+            ),
+        )
+        for d in (0, 2, 4)
+    ]
+
+    await harness.private(COACH, "/trainings")  # один состав — без выбора
+    sent = [
+        m for m in harness.session.requests if isinstance(m, SendMessage) and m.chat_id == COACH
+    ]
+    header, *cards = sent[-3:]
+    assert header.text.startswith("<b>Ближайшие тренировки")
+    assert [c.text.splitlines()[0] for c in cards] == ["⛹️ <b>Тренировка</b>"] * 2
+    assert "📍 Зал 0" in cards[0].text and "📍 Зал 2" in cards[1].text  # третья не показана
+    markup = cards[0].reply_markup
+    assert isinstance(markup, InlineKeyboardMarkup)
+    assert [(b.text, b.callback_data) for row in markup.inline_keyboard for b in row] == [
+        ("🔁 Перенести", ItemAction(kind="tr", action="move_ask", item_id=trainings[0].id).pack()),
+        ("❌ Отменить", ItemAction(kind="tr", action="cancel", item_id=trainings[0].id).pack()),
+    ]
+
+    # перенос: вопрос ничего не меняет, после подтверждения — новое время
+    first = trainings[0].id
+    await harness.press(COACH, ItemAction(kind="tr", action="move_ask", item_id=first).pack())
+    assert harness.session.texts_to(COACH)[-1].startswith("Перенести тренировку")
+    key = StorageKey(bot_id=harness.bot.id, chat_id=COACH, user_id=COACH)
+    assert await harness.dp.storage.get_state(key) is None
+    await harness.press(COACH, ItemAction(kind="tr", action="move", item_id=first).pack())
+    edits = [m.text for m in harness.session.requests if isinstance(m, EditMessageText)]
+    assert edits[-1] == ru.TRAINING_MOVE_PROMPT
+    new_start = start + timedelta(hours=2)
+    local = new_start.astimezone(ZoneInfo(squad.timezone))
+    await harness.private(COACH, f"{local:%d.%m.%Y %H:%M}")
+    assert (await services.trainings.get(coach, first)).starts_at == new_start
 
 
 async def test_group_message_discovers_member_who_joined_before_bot(
@@ -973,6 +1028,83 @@ async def test_match_fallback_buttons(
     await harness.press(COACH, none)
     edits = [m.text for m in harness.session.requests if isinstance(m, EditMessageText)]
     assert edits[-1] == ru.MATCH_FALLBACK_NONE_DONE  # запрос заменён отметкой, кнопок нет
+
+
+async def test_events_list_with_move_and_cancel_buttons(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """/events: каждое событие — отдельным сообщением; у тренера — «Перенести» и «Отменить»,
+    обе через подтверждение; у игрока кнопок нет."""
+    await bind(harness)
+    for tg_id in (COACH, PLAYER):
+        await harness.member(tg_id, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach = await ctx_of(services, COACH)
+    await services.squads.set_role(admin, squad.id, coach.user.id, SquadRole.COACH, grant=True)
+    coach = await ctx_of(services, COACH)
+    start = datetime.now(UTC).replace(second=0, microsecond=0) + timedelta(days=3)
+    match = await services.events.create(
+        coach,
+        EventCreate(squad_id=squad.id, type="match", title="Финал", starts_at=start),
+    )
+    meeting = await services.events.create(
+        coach,
+        EventCreate(
+            squad_id=squad.id, type="meeting", title="Сбор", starts_at=start + timedelta(days=1)
+        ),
+    )
+
+    def sent_to(tg_id: int) -> list[SendMessage]:
+        return [
+            m for m in harness.session.requests if isinstance(m, SendMessage) and m.chat_id == tg_id
+        ]
+
+    def buttons(m: SendMessage) -> list[str]:
+        markup = m.reply_markup
+        assert isinstance(markup, InlineKeyboardMarkup)
+        return [b.callback_data or "" for row in markup.inline_keyboard for b in row]
+
+    await harness.private(COACH, "/events")
+    header, *cards = sent_to(COACH)[-3:]
+    assert header.text == ru.EVENTS_HEADER
+    assert cards[0].text.startswith("🏀 <b>Матч: Финал</b>")
+    assert cards[1].text.startswith("🕺 <b>Собрание: Сбор</b>")
+    assert buttons(cards[0]) == [
+        ItemAction(kind="ev", action="move_ask", item_id=match.id).pack(),
+        ItemAction(kind="ev", action="del_ask", item_id=match.id).pack(),
+    ]
+
+    await harness.private(PLAYER, "/events")
+    assert all(m.reply_markup is None for m in sent_to(PLAYER)[-2:])
+
+    # отмена: вопрос ничего не меняет, подтверждение — отменяет
+    await harness.press(COACH, ItemAction(kind="ev", action="del_ask", item_id=meeting.id).pack())
+    question = sent_to(COACH)[-1]
+    assert question.text.startswith("Отменить Собрание: <b>Сбор</b>")
+    confirm = ItemAction(kind="ev", action="del", item_id=meeting.id).pack()
+    assert confirm in buttons(question)
+    assert len(await services.events.upcoming([squad.id])) == 2
+    await harness.press(COACH, confirm)
+    assert [e.id for e, _, _ in await services.events.upcoming([squad.id])] == [match.id]
+    edits = [m.text for m in harness.session.requests if isinstance(m, EditMessageText)]
+    assert edits[-1] == ru.EVENT_DELETED
+
+    # перенос: вопрос → подтверждение → новое время
+    await harness.press(COACH, ItemAction(kind="ev", action="move_ask", item_id=match.id).pack())
+    assert sent_to(COACH)[-1].text.startswith("Перенести Матч: <b>Финал</b>")
+    await harness.press(COACH, ItemAction(kind="ev", action="move", item_id=match.id).pack())
+    edits = [m.text for m in harness.session.requests if isinstance(m, EditMessageText)]
+    assert edits[-1] == ru.EVENT_MOVE_ASK_WHEN
+    new_start = start + timedelta(days=2)
+    local = new_start.astimezone(ZoneInfo(squad.timezone))
+    await harness.private(COACH, f"{local:%d.%m.%Y %H:%M}")
+    assert (await services.events.get(match.id)).starts_at == new_start
+
+    # игроку без права подтверждение не поможет
+    await harness.press(PLAYER, ItemAction(kind="ev", action="del", item_id=match.id).pack())
+    assert len(await services.events.upcoming([squad.id])) == 1
 
 
 async def test_payment_block_only_for_coach(

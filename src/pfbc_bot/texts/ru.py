@@ -94,13 +94,10 @@ HELP_BY_PERMISSION: dict[str, str] = {
     "training_poll": "/poll — опрос на тренировку (раньше времени или заново)",
     "attendance": "/attendance — кто придёт: тренировки, матчи, турниры, разборы",
     "duty": "/duty — дежурные: замена и ручной выбор",
-    "meetings": (
-        "/event_add — собрание команды\n/event_move — перенести\n/event_del — удалить событие"
-    ),
+    "meetings": ("/event_add — собрание команды\n/events — ближайшие события: перенос и отмена"),
     "events": (
         "/event_add — матч, турнир, разбор, сборы и другие события\n"
-        "/event_move — перенести событие\n"
-        "/event_del — удалить событие\n"
+        "/events — ближайшие события: перенос и отмена\n"
         "/review — назначить разбор игры (опрос «Буду / Не смогу»)\n"
         "/tournaments — турниры: привязка матчей, стоимость игры"
     ),
@@ -204,6 +201,11 @@ SCHEDULE_ADDED = "✅ Добавлено. Тренировки на ближай
 SCHEDULE_REMOVED = "✅ Удалено из расписания, будущие тренировки по нему отменены."
 TRAININGS_HEADER = "<b>Ближайшие тренировки: {squad}</b>"
 TRAININGS_EMPTY = "Ближайших тренировок нет."
+TRAINING_CARD = "⛹️ <b>Тренировка</b>\n🕒 {when}\n📍 {venue}"
+TRAINING_BTN_MOVE = "🔁 Перенести"
+TRAINING_BTN_CANCEL = "❌ Отменить"
+TRAINING_CONFIRM_MOVE = "Перенести тренировку {when}? Команда получит сообщение в группе."
+TRAINING_BTN_CONFIRM_MOVE = "Да, перенести"
 TRAINING_ADD_PROMPT = (
     "Отправьте: <b>дата время длительность зал</b>\n"
     "Например: <code>12.10.2026 19:00 90 Зал школы №5</code>"
@@ -357,7 +359,7 @@ BTN_CHANGE_TIME = "Изменить время"
 CONFLICT_TRAINING = "Тренировка, {venue}"
 CONFLICT_MATCH = "Матч с {opponent}"
 CONFLICT_EVENT = "{type}: {title}"
-EVENT_CREATED = "✅ Событие добавлено:\n{event}"
+EVENT_CREATED = "✅ Событие добавлено:\n\n{event}"
 EVENT_PUBLISHED = "Опубликовано в группе состава."
 EVENT_PUBLISHED_WITH_POLL = "Опубликовано в группе состава вместе с опросом участия."
 EVENT_MOVED_GROUP = (
@@ -365,11 +367,20 @@ EVENT_MOVED_GROUP = (
 )
 EVENT_PLACE_CHANGED = "📍 <b>Новое место — {type}: {title}</b>\n🕒 {when}\n📍 <b>{place}</b>"
 EVENT_MOVE_PAST = "Перенести можно только будущее событие и только на будущее время."
-EVENT_MOVE_CHOOSE = "Какое событие перенести?"
-EVENT_MOVE_ASK_WHEN = (
-    "Новые дата и время: <code>дд.мм.гггг чч:мм</code>\n"
-    "Команда получит сообщение о переносе, опрос участия будет опубликован заново."
+EVENT_BTN_MOVE = "🔁 Перенести"
+EVENT_BTN_CANCEL = "❌ Отменить"
+EVENT_CONFIRM_MOVE = (
+    "Перенести {type}: <b>{title}</b>, {when}?\n"
+    "Если событие публиковалось в группе, команда получит сообщение о переносе, а опрос участия "
+    "будет опубликован заново."
 )
+EVENT_CONFIRM_CANCEL = (
+    "Отменить {type}: <b>{title}</b>, {when}?\n"
+    "Если событие публиковалось в группе, команда получит сообщение об отмене."
+)
+EVENT_BTN_CONFIRM_MOVE = "Да, перенести"
+EVENT_BTN_CONFIRM_CANCEL = "Да, отменить"
+EVENT_MOVE_ASK_WHEN = "Новые дата и время: <code>дд.мм.гггг чч:мм</code>"
 EVENT_MOVE_ASK_DATE = "Новая дата старта турнира: <code>дд.мм.гггг</code>"
 EVENT_MOVED = "✅ Перенесено: {when}"
 EVENT_NOT_PUBLISHED = (
@@ -379,13 +390,14 @@ EVENT_NOT_PUBLISHED = (
 EVENT_PUBLISHED_POLL_FAILED = (
     "⚠️ Пост опубликован, а опрос участия — нет (Telegram не принял). Событие сохранено."
 )
-EVENT_DELETED = "✅ Событие удалено."
+EVENT_DELETED = "✅ Событие отменено."
 EVENTS_HEADER = "<b>Ближайшие события</b>"
 EVENTS_EMPTY = "Ближайших событий нет."
-EVENT_LINE = "• {when} — <b>{title}</b> ({type}, {squad}){place}"
+# карточка события в списках (/events, «событие добавлено», «матч прошёл») — как пост о нём
+EVENT_CARD = "{emoji} <b>{type}: {title}</b>\n🕒 {when}{place}{tournament}{squad}"
 EVENT_POLL_QUESTION = "{type}: {title}{tournament}, {when}. Будешь?"
 TOURNAMENT_POLL_QUESTION = "🏆 Турнир: {title}, {when}. Участвуешь?"
-EVENT_ANNOUNCE = "🗓 <b>{type}: {title}</b>\n🕒 {when}{place}{tournament}{description}"
+EVENT_ANNOUNCE = "{emoji} <b>{type}: {title}</b>\n🕒 {when}{place}{tournament}{description}"
 EVENT_CANCELLED = "❌ <b>Отменено — {type}: {title}</b>\n🕒 {when}{tournament}"
 EVENT_REMINDER = "⏰ Напоминание{when_left}: <b>{title}</b>\n{when}{place}{tournament}{description}"
 EVENT_TOURNAMENT = "🏆 Турнир: {title}"
@@ -705,10 +717,10 @@ MATCH_FALLBACK_NONE_DONE = "Отмечено: игры на этих выход�
 MATCH_DIFF = (
     "⚠️ <b>{title}</b>: на mtgame.ru данные отличаются от введённых вручную.\n"
     "В журнале: {ours}\nНа mtgame: {theirs}\n"
-    "Матч в журнале не изменён. Если верно mtgame — перенесите его: /event_move"
+    "Матч в журнале не изменён. Если верно mtgame — перенесите его: /events"
 )
 MATCH_GONE = (
     "⚠️ <b>{title}</b>, {when}: на mtgame.ru игра пропала из расписания или у неё сняли дату — "
-    "возможно, её отменили или переносят. Уточните у лиги; если игры не будет — удалите матч: "
-    "/event_del"
+    "возможно, её отменили или переносят. Уточните у лиги; если игры не будет — отмените матч: "
+    "/events"
 )

@@ -393,7 +393,7 @@ async def test_match_shows_its_tournament(
         x for x in await services.events.upcoming([squad_id], now=NOW) if x[0].id == match.id
     ]
     assert dto.tournament_title == "Кубок"
-    assert "🏆 Кубок" in format_event_line(dto, "Взрослые", MSK)
+    assert "🏆 Турнир: Кубок" in format_event_line(dto, MSK, "Взрослые")
 
     await services.events.send_due_reminders(now=at(9))  # в день матча
     assert any("🏆 Турнир: Кубок" in m.text and "Динамо" in m.text for m in notifier.to(COACH))
