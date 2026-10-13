@@ -53,14 +53,10 @@ class GamePaymentsRepository:
         await self._session.flush()
         return notice
 
-    async def last_notice(self, poll_id: int) -> RosterNotice | None:
-        stmt = (
-            select(RosterNotice)
-            .where(RosterNotice.poll_id == poll_id)
-            .order_by(RosterNotice.id.desc())
-            .limit(1)
-        )
-        return (await self._session.scalars(stmt)).first()
+    async def notices(self, poll_id: int) -> list[RosterNotice]:
+        """Уведомления по опросу участия — по одному на получателя."""
+        stmt = select(RosterNotice).where(RosterNotice.poll_id == poll_id)
+        return list(await self._session.scalars(stmt.order_by(RosterNotice.id)))
 
     async def visible_notices(
         self, *, poll_id: int | None = None, event_id: int | None = None

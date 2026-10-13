@@ -55,6 +55,8 @@ class FakeNotifier:
     chat_members: dict[int, set[int]] = field(default_factory=dict)
     blocked_dm: set[int] = field(default_factory=set)
     edits: list[tuple[int, int, str]] = field(default_factory=list)
+    # правка сообщений в этих чатах не проходит (сообщение удалили)
+    fail_edits: set[int] = field(default_factory=set)
     stopped_polls: list[tuple[int, int]] = field(default_factory=list)
     deleted: list[tuple[int, int]] = field(default_factory=list)
     # send_poll с этим порядковым номером не доставлен
@@ -87,6 +89,8 @@ class FakeNotifier:
     async def edit_message(
         self, chat_id: int, message_id: int, text: str, *, keyboard: Keyboard | None = None
     ) -> bool:
+        if chat_id in self.fail_edits:
+            return False
         self.edits.append((chat_id, message_id, text))
         return True
 

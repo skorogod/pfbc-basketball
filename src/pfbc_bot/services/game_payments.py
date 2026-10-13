@@ -8,9 +8,9 @@ match публикуется «Состав на матч». После дедл
 «Оплатил», бот пишет в личку, а не дошедших — упоминает в группе. Сколько раз и с каким
 интервалом — настройки состава; с 00:00 до 08:00 не напоминает.
 
-Пока сбор не начат, тренерам и админам состава приходит «Буду (игрок)» отметили N» — когда
-набралось game_payment_squad_size, и потом при каждом изменении числа (кнопка «Начать сбор»
-— только в последнем сообщении).
+Пока сбор не начат, тренерам и админам состава приходит «Буду (игрок)» отметили N» с кнопкой
+«Начать сбор» — когда набралось game_payment_squad_size. Дальше число меняется в этом же
+сообщении (правка без уведомления — тренера не дёргаем новыми сообщениями).
 """
 
 import html
@@ -75,7 +75,7 @@ from pfbc_bot.services.events import (
     to_dtos,
 )
 from pfbc_bot.services.permissions import Recipients, require
-from pfbc_bot.services.ports import InlineButton, Notifier
+from pfbc_bot.services.ports import InlineButton, Keyboard, Notifier
 from pfbc_bot.services.settings import load_squad_settings
 from pfbc_bot.texts import ru
 
@@ -445,11 +445,10 @@ class GamePaymentService:
 
     # --- «Буду (игрок)» отметили N: тренерам и админам, кнопка «Начать сбор» ---
     async def send_roster_updates(self, *, now: datetime | None = None) -> int:
-        """Тик worker-а (раз в минуту): по будущим матчам с открытым голосованием и без сбора —
-        первое сообщение, когда «Буду (игрок)» набралось game_payment_squad_size, дальше — при
-        каждом изменении числа (изменения за минуту — одним сообщением; вернулось к прежнему —
-        ничего). Кнопка — только в последнем сообщении: у прежних снимается. Возвращает число
-        разосланных уведомлений."""
+        """Тик worker-а (раз в минуту): по будущим матчам с открытым голосованием и без сбора.
+        «Буду (игрок)» набралось game_payment_squad_size — тренерам и админам сообщение с
+        кнопкой «Начать сбор»; дальше число меняется в том же сообщении (изменения за минуту —
+        одной правкой). Возвращает число матчей, по которым отправлено или обновлено."""
         now = now or utcnow()
         async with self._uow_factory() as uow:
             match_ids = [
@@ -458,11 +457,11 @@ class GamePaymentService:
                     EventType.MATCH, now, now + ROSTER_NOTICE_HORIZON
                 )
             ]
-        sent = 0
+        changed = 0
         for match_id in match_ids:
-            sent += await self._roster_update(match_id, now)
+            changed += await self._roster_update(match_id, now)
         await self._hide_stale_notices(now)
-        return sent
+        return changed
 
     async def _roster_update(self, match_id: int, now: datetime) -> int:
         async with self._uow_factory() as uow:
@@ -478,54 +477,70 @@ class GamePaymentService:
             if await uow.game_payments.active_for_event(match.id) is not None:
                 return 0
             count = await _voted_count(uow, match.squad_id, match.id)
-            last = await uow.game_payments.last_notice(poll.id)
-            if last is None and count < settings.game_payment_squad_size:
+            notices = await uow.game_payments.notices(poll.id)
+            if not notices and count < settings.game_payment_squad_size:
                 return 0
-            if last is not None and last.players == count:
+            if notices and notices[-1].players == count:
                 return 0
-            hidden = await _hide_notices(uow, now, poll_id=poll.id)
             tz = squad_tz(await uow.squads.get(match.squad_id))
             [event] = await to_dtos(uow, [match])
             text = format_roster_notice(
-                event,
-                tz,
-                count,
-                last.players if last is not None else None,
-                settings,
-                has_price=await _game_price(uow, match) is not None,
+                event, tz, count, settings, await _game_price(uow, match) is not None, now
             )
-            keyboard = [
-                [
-                    InlineButton(
-                        ru.ROSTER_BTN_START,
-                        callbacks.pack(callbacks.ROSTER, callbacks.ROSTER_START, match.id),
-                    )
-                ]
-            ]
-            delivered = 0
-            for user in await self._roster_recipients(uow, match.squad_id):
-                message_id = await self._notifier.send_message(
-                    user.tg_user_id, text, keyboard=keyboard
-                )
-                user.dm_available = message_id is not None
-                delivered += message_id is not None
-                # и недоставленное запоминается: число учтено, повторять каждую минуту незачем
-                await uow.game_payments.add_notice(
-                    RosterNotice(
-                        event_id=match.id,
-                        poll_id=poll.id,
-                        user_id=user.id,
-                        chat_id=user.tg_user_id,
-                        message_id=message_id,
-                        text=text,
-                        players=count,
-                        hidden_at=None if message_id is not None else now,
-                    )
-                )
+            keyboard = _start_keyboard(match.id)
+            if notices:
+                await self._edit_notices(notices, text, keyboard, count)
+            else:
+                await self._send_notices(uow, match, poll.id, text, keyboard, count, now)
             await uow.commit()
-        await self._strip_buttons(hidden)
-        log.info("roster_notice_sent", event_id=match_id, players=count, delivered=delivered)
+        log.info("roster_notice", event_id=match_id, players=count, edited=bool(notices))
         return 1
+
+    async def _send_notices(
+        self,
+        uow: UnitOfWork,
+        match: Event,
+        poll_id: int,
+        text: str,
+        keyboard: Keyboard,
+        count: int,
+        now: datetime,
+    ) -> None:
+        """Первое сообщение — каждому получателю; запоминается и недоставленное: число учтено,
+        повторять каждую минуту незачем."""
+        for user in await self._roster_recipients(uow, match.squad_id):
+            message_id = await self._notifier.send_message(user.tg_user_id, text, keyboard=keyboard)
+            user.dm_available = message_id is not None
+            await uow.game_payments.add_notice(
+                RosterNotice(
+                    event_id=match.id,
+                    poll_id=poll_id,
+                    user_id=user.id,
+                    chat_id=user.tg_user_id,
+                    message_id=message_id,
+                    text=text,
+                    players=count,
+                    hidden_at=None if message_id is not None else now,
+                )
+            )
+
+    async def _edit_notices(
+        self, notices: list[RosterNotice], text: str, keyboard: Keyboard, count: int
+    ) -> None:
+        """Новое число — правкой того же сообщения (без уведомления). Не вышло (сообщение
+        удалили) — новым сообщением, дальше правится оно."""
+        for notice in notices:
+            notice.players = count
+            if notice.hidden_at is not None or notice.message_id is None:
+                continue
+            notice.text = text
+            if await self._notifier.edit_message(
+                notice.chat_id, notice.message_id, text, keyboard=keyboard
+            ):
+                continue
+            message_id = await self._notifier.send_message(notice.chat_id, text, keyboard=keyboard)
+            if message_id is not None:
+                notice.message_id = message_id
 
     async def _roster_recipients(self, uow: UnitOfWork, squad_id: int) -> list[User]:
         """Тренерам (право сбора денег) и админам — участникам состава; нет таких — корневым
@@ -852,6 +867,17 @@ def _suggestion(price: Decimal, players: int) -> AmountSuggestion:
     return AmountSuggestion(game_price=price, players=players, per_player=per_player)
 
 
+def _start_keyboard(match_id: int) -> Keyboard:
+    return [
+        [
+            InlineButton(
+                ru.ROSTER_BTN_START,
+                callbacks.pack(callbacks.ROSTER, callbacks.ROSTER_START, match_id),
+            )
+        ]
+    ]
+
+
 def _name_key(user: User) -> str:
     return to_dto(user).display_name.casefold()
 
@@ -934,11 +960,11 @@ def format_roster_notice(
     event: EventDTO,
     tz: str,
     count: int,
-    previous: int | None,
     settings: SquadSettings,
     has_price: bool,
+    now: datetime,
 ) -> str:
-    """Тренеру/админу: сколько отметили «Буду (игрок)» (и сколько было) и что учесть."""
+    """Тренеру/админу: сколько отметили «Буду (игрок)» сейчас и что учесть."""
     hints = []
     if count > settings.game_roster_max:
         hints.append(ru.ROSTER_NOTICE_TOO_MANY.format(max=settings.game_roster_max))
@@ -951,13 +977,12 @@ def format_roster_notice(
         )
     if not has_price:
         hints.append(ru.ROSTER_NOTICE_NO_PRICE)
-    template = ru.ROSTER_NOTICE_FIRST if previous is None else ru.ROSTER_NOTICE_UPDATE
-    return template.format(
+    return ru.ROSTER_NOTICE.format(
         title=html.escape(event.title),
         when=format_match_when(event, tz),
         count=count,
-        previous=previous,
         hints="".join(f"\n{h}" for h in hints),
+        updated=f"{to_local(now, tz):%d.%m %H:%M}",
     )
 
 

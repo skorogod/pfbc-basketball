@@ -608,11 +608,9 @@ ROSTER_POST = (
     "🏀 <b>Состав на матч</b>\n<b>{title}</b>\n🗓 {when}{place}{tournament}{description}\n\n"
     "<b>Игроки ({count}):</b>\n{players}"
 )
-ROSTER_NOTICE_FIRST = (
-    "🏀 <b>{title}</b>\n🗓 {when}\n\nСостав набран: «Буду (игрок)» отметили <b>{count}</b>.{hints}"
-)
-ROSTER_NOTICE_UPDATE = (
-    "🏀 <b>{title}</b>\n🗓 {when}\n\n«Буду (игрок)» теперь <b>{count}</b> (было {previous}).{hints}"
+ROSTER_NOTICE = (
+    "🏀 <b>{title}</b>\n🗓 {when}\n\n«Буду (игрок)» отметили <b>{count}</b>.{hints}\n\n"
+    "<i>Число обновляется здесь же, обновлено {updated}</i>"
 )
 ROSTER_NOTICE_TOO_MANY = "В заявку войдут не больше {max} — выберете при начале сбора."
 ROSTER_NOTICE_SHORT = "До полного состава ({size}) не хватает {missing}."
