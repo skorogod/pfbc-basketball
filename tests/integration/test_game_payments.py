@@ -83,7 +83,7 @@ async def test_payment_post_poll_and_reminders(
 
     post = notifier.to(CHAT_ID)[-1]
     assert post.thread_id == MATCH_THREAD
-    assert "PFBC — Динамо" in post.text and "ФОК" in post.text
+    assert "PFBC — Динамо" in post.text and "ФОК" not in post.text  # место — в посте о матче
     assert "Сумма: 2 500 ₽" in post.text and "+79991234567" in post.text
     assert "Оплатить до" in post.text
     assert notifier.polls[-1] == (CHAT_ID, "💰 Оплата игры «PFBC — Динамо»: 2 500 ₽", MATCH_THREAD)

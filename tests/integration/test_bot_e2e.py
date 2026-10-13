@@ -740,14 +740,13 @@ async def test_game_pay_with_suggested_amount_and_new_details(
     assert harness.session.texts_to(COACH)[-1].startswith("Сохранить эти реквизиты")
     await harness.press(COACH, Choice(flow="gp_save", value="yes").pack())
     preview = harness.session.texts_to(COACH)[-1]
-    assert "Сумма: 7 500 ₽" in preview and "+79991234567" in preview and "Кубок" in preview
+    assert "Сумма: 7 500 ₽" in preview and "+79991234567" in preview and "Финал" in preview
     assert "Состав на матч" in preview and "Игроки (2)" in preview
     await harness.press(COACH, Choice(flow="gp_pub", value="yes").pack())
 
     assert notifier.polls[-1][1] == "💰 Оплата игры «Финал»: 7 500 ₽"
     roster_post, post = (m.text for m in notifier.to(GROUP_ID)[-2:])
     assert roster_post.startswith("🏀 <b>Состав на матч</b>\n<b>Финал</b>\n🗓 ")
-    assert "\n🏆 Кубок" in roster_post and "📍" not in roster_post  # места нет — строки нет
     assert '1. <a href="tg://user?id=' in roster_post and "2. " in roster_post
     assert "Сумма: 7 500 ₽" in post and "Платят игроки из состава выше (2)" in post
     [saved] = await services.game_payments.details_of(coach.user.id)

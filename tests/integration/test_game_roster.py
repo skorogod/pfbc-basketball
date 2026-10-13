@@ -260,10 +260,15 @@ async def test_payment_follows_roster_not_poll(
     await services.game_payments.create(coach, payment(match_id, coach.user.id, roster), now=NOW)
 
     roster_post, post = (m.text for m in notifier.to(CHAT_ID)[-2:])
+    # место и описание — в закреплённом посте о матче, здесь название и дата
     assert roster_post.startswith(
-        "🏀 <b>Состав на матч</b>\n<b>PFBC — Динамо</b>\n🗓 вс, 18.10 · 12:30\n📍 ФОК «Москвич»"
-        "\n🏆 ABL\n\n<b>Игроки (12):</b>\n1. "
+        "🏀 <b>Состав на матч</b>\n<b>PFBC — Динамо</b>\n🗓 вс, 18.10 · 12:30\n\n"
+        "<b>Игроки (12):</b>\n1. "
     )
+    assert post.startswith(
+        "💰 <b>Сбор за игру</b>\n<b>PFBC — Динамо</b>\n🗓 вс, 18.10 · 12:30\n\n<b>Сумма:"
+    )
+    assert "📍" not in post and "🕒" not in post
     assert "user101" in roster_post and "user12" not in roster_post
     assert notifier.to(CHAT_ID)[-1].thread_id == MATCH_THREAD
     assert "Платят игроки из состава выше (12)" in post
@@ -280,6 +285,7 @@ async def test_payment_follows_roster_not_poll(
     await services.polls.record_answer(pay_poll, CAPTAIN, [PAID], now=NOW)
     [all_paid] = [m.text for m in notifier.to(COACH) if "Все игроки оплатили" in m.text]
     assert "Оплатили 12 из 12" in all_paid
+    assert "PFBC — Динамо" in all_paid and "🏆" not in all_paid  # турнир тренеру не нужен
     status = await services.game_payments.status(coach, match_id)
     assert status is not None and len(status.paid) == 12 and len(status.others_paid) == 1
 

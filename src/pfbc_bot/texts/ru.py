@@ -525,7 +525,7 @@ RECEIPT_NOT_SENT = "Не удалось опубликовать опрос в �
 # --- сбор денег за игру (не путать с оплатой тренировок по квитанциям) ---
 GAME_PAYMENT_EVENT = "{type}: <b>{title}</b>, {when}{tournament}"
 GAME_PAYMENT_POST = (
-    "💰 <b>Сбор за игру</b>\n\n{event}\n\n"
+    "💰 <b>Сбор за игру</b>\n<b>{title}</b>\n🗓 {when}\n\n"
     "<b>Сумма: {amount}</b>\n👤 Получатель: {collector}\n{details}{deadline}\n\n"
     "Платят игроки из состава выше ({players}). После перевода отметьте «Оплатил» в опросе ниже."
 )
@@ -605,8 +605,7 @@ GAME_PAYMENT_AMOUNT_CALC = (
 
 # --- заявка на игру и «Состав на матч» ---
 ROSTER_POST = (
-    "🏀 <b>Состав на матч</b>\n<b>{title}</b>\n🗓 {when}{place}{tournament}{description}\n\n"
-    "<b>Игроки ({count}):</b>\n{players}"
+    "🏀 <b>Состав на матч</b>\n<b>{title}</b>\n🗓 {when}\n\n<b>Игроки ({count}):</b>\n{players}"
 )
 ROSTER_NOTICE = (
     "🏀 <b>{title}</b>\n🗓 {when}\n\n«Буду (игрок)» отметили <b>{count}</b>.{hints}\n\n"

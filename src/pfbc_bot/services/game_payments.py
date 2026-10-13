@@ -72,7 +72,6 @@ from pfbc_bot.services.errors import Conflict, NotFound
 from pfbc_bot.services.events import (
     EVENT_REF,
     GAME_PAYMENT_REF,
-    format_announcement,
     format_when,
     to_dtos,
 )
@@ -431,9 +430,16 @@ class GamePaymentService:
             tz = squad_tz(await uow.squads.get(match.squad_id))
             [event] = await to_dtos(uow, [match])
             return PaymentPreview(
-                roster=format_roster_post(event, players, tz),
+                roster=format_roster_post(event, players, tz, in_group=False),
                 post=format_payment_post(
-                    event, data.amount, collector, details, data.deadline_at, tz, len(players)
+                    event,
+                    data.amount,
+                    collector,
+                    details,
+                    data.deadline_at,
+                    tz,
+                    len(players),
+                    in_group=False,
                 ),
             )
 
@@ -664,7 +670,7 @@ class GamePaymentService:
             tz = squad_tz(await uow.squads.get(payment.squad_id))
             [event] = await to_dtos(uow, [match])
             text = ru.GAME_PAYMENT_ALL_PAID.format(
-                event=_event_line(event, tz),
+                event=_event_line(event, tz, with_tournament=False),
                 count=len(players),
                 amount=format_amount(payment.amount),
                 names=", ".join(profile(u) for u in players.values()),
@@ -915,12 +921,18 @@ def _option_index(poll: Poll, label: str) -> int | None:
     return options.index(label) if label in options else None
 
 
-def _event_line(event: EventDTO, tz: str) -> str:
-    tournament = f" · 🏆 {html.escape(event.tournament_title)}" if event.tournament_title else ""
+def _event_line(event: EventDTO, tz: str, *, with_tournament: bool = True) -> str:
+    """«Матч: <b>название</b>, дата» — без места: оно в закреплённом посте о матче.
+    with_tournament=False — тренеру: турнир своей игры он знает."""
+    tournament = (
+        f" · 🏆 {html.escape(event.tournament_title)}"
+        if with_tournament and event.tournament_title
+        else ""
+    )
     return ru.GAME_PAYMENT_EVENT.format(
         type=EVENT_TYPE_TITLES[event.type],
         title=html.escape(event.title),
-        when=format_when(event, tz),
+        when=format_match_when(event, tz),
         tournament=tournament,
     )
 
@@ -933,16 +945,20 @@ def format_payment_post(
     deadline_at: datetime | None,
     tz: str,
     players: int,
+    *,
+    in_group: bool = True,
 ) -> str:
-    """Пост о сборе: игра со всей информацией, ниже — реквизиты, сумма и срок. Список
-    игроков — в «Составе на матч» над постом."""
+    """Пост о сборе: игра (название и дата — место есть в закреплённом посте о ней), ниже —
+    реквизиты, сумма и срок. Список игроков — в «Составе на матч» над постом. in_group=False —
+    предпросмотр в личке (см. _dm_link)."""
     deadline = (
         ru.GAME_PAYMENT_DEADLINE.format(when=format_local(deadline_at, tz)) if deadline_at else ""
     )
     return ru.GAME_PAYMENT_POST.format(
-        event=format_announcement(event, tz),
+        title=html.escape(event.title),
+        when=format_match_when(event, tz),
         amount=format_amount(amount),
-        collector=mention(collector),  # пост — в группе: упоминание работает всегда
+        collector=mention(collector) if in_group else _dm_link(collector),
         details=details.text,
         deadline=deadline,
         players=players,
@@ -957,21 +973,31 @@ def format_match_when(event: EventDTO, tz: str) -> str:
     return f"{WEEKDAY_SHORT[local.weekday()]}, {local:%d.%m · %H:%M}"
 
 
-def format_roster_post(event: EventDTO, players: list[User], tz: str) -> str:
-    """«Состав на матч» для группы: что, когда, где, кто. Игроки — по алфавиту, упоминаниями
-    (включённые получают уведомление)."""
+def format_roster_post(
+    event: EventDTO, players: list[User], tz: str, *, in_group: bool = True
+) -> str:
+    """«Состав на матч»: игра (название и дата — место есть в закреплённом посте о ней) и кто
+    играет. Игроки — по алфавиту; в группе — упоминаниями (включённые получают уведомление),
+    в личке (in_group=False, предпросмотр) — см. _dm_link."""
     names = sorted(players, key=_name_key)
+    name = mention if in_group else _dm_link
     return ru.ROSTER_POST.format(
         title=html.escape(event.title),
         when=format_match_when(event, tz),
-        place=f"\n📍 {html.escape(event.place)}" if event.place else "",
-        tournament=(
-            f"\n🏆 {html.escape(event.tournament_title)}" if event.tournament_title else ""
-        ),
-        description=f"\n{html.escape(event.description)}" if event.description else "",
         count=len(names),
-        players="\n".join(f"{n}. {mention(u)}" for n, u in enumerate(names, 1)),
+        players="\n".join(f"{n}. {name(u)}" for n, u in enumerate(names, 1)),
     )
+
+
+def _dm_link(user: User) -> str:
+    """Имя для предпросмотра в личке. Упоминание tg://user Telegram показывает в личке только
+    для тех, кто писал боту, — у остальных ссылка молча пропадает. Поэтому при username —
+    ссылка t.me (открывается всегда), иначе — как в profile_link, но без пометки «не в боте»:
+    предпросмотр повторяет пост для группы, где ссылки будут у всех."""
+    dto = to_dto(user)
+    if dto.username or dto.knows_bot:
+        return dto.profile_html
+    return html.escape(dto.display_name)
 
 
 def format_roster_notice(
