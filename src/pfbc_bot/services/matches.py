@@ -9,12 +9,19 @@
 закрывается, как только найдена следующая. С features.match_monitoring источник опрашивается
 на каждом тике: лига меняет время или зал → перенос (сообщение и новый опрос) или сообщение о
 новом месте; игра пропала из расписания или у неё сняли дату → предупреждение тренерам.
+
+Фолбэк: к дедлайну (match_fallback_weekday / match_fallback_time, по умолчанию четверг 20:00)
+в журнале нет матча на ближайшие выходные (не нашёлся на mtgame или сайт недоступен) —
+тренерам запрос «введите матч вручную / игры нет». Ручная запись имеет приоритет: найдя ту
+же игру на mtgame, синхронизация её не переносит, а только сообщает о расхождении.
 """
 
+import hashlib
 import html
 from collections.abc import Iterable
 from datetime import datetime, time, timedelta
 
+from pfbc_bot import callbacks
 from pfbc_bot.db.models import Match
 from pfbc_bot.domain.dates import format_local, local_to_utc, to_local, utcnow
 from pfbc_bot.domain.enums import EventType, MatchSource
@@ -24,11 +31,12 @@ from pfbc_bot.repositories.uow import UnitOfWork, UowFactory
 from pfbc_bot.schemas.events import EventDTO
 from pfbc_bot.schemas.matches import ExternalGame
 from pfbc_bot.schemas.settings import SquadSettings
-from pfbc_bot.services.common import notify_admins
+from pfbc_bot.schemas.squads import UserContext
+from pfbc_bot.services.common import notify_admins, squad_tz
 from pfbc_bot.services.events import EventService
-from pfbc_bot.services.permissions import Recipients
+from pfbc_bot.services.permissions import Recipients, require
+from pfbc_bot.services.ports import InlineButton, MatchSourceError, Notifier
 from pfbc_bot.services.ports import MatchSource as MatchSourcePort
-from pfbc_bot.services.ports import MatchSourceError, Notifier
 from pfbc_bot.services.settings import load_squad_settings
 from pfbc_bot.texts import ru
 
@@ -40,6 +48,12 @@ MANUAL_MATCH_WINDOW = timedelta(hours=3)
 TOURNAMENTS_WINDOW = timedelta(days=365)
 SOURCE_FAILURE_KIND = "match_source"
 MATCH_GONE_KIND = "match_gone"
+MATCH_FALLBACK_KIND = "match_fallback"
+MATCH_DIFF_KIND = "match_diff"
+# фолбэк: матч ищется с дедлайна по понедельник (игровые выходные); запрос, пропущенный больше
+# чем на столько (worker был выключен), уже не отправляется
+FALLBACK_WINDOW = timedelta(days=4)
+FALLBACK_GRACE = timedelta(hours=12)
 
 
 def source_failure_key(squad_id: int, day: str) -> str:
@@ -50,6 +64,26 @@ def source_failure_key(squad_id: int, day: str) -> str:
 def match_gone_key(match_id: int) -> str:
     """Игра пропала из источника — тренерам один раз на матч."""
     return f"match_gone:{match_id}"
+
+
+def fallback_key(squad_id: int, deadline: datetime) -> str:
+    """Запрос «матч не найден» — один раз на состав за неделю (дедлайн)."""
+    return f"match_fallback:{squad_id}:{deadline:%Y-%m-%d}"
+
+
+def match_diff_key(match_id: int, game: ExternalGame) -> str:
+    """Расхождение ручной записи с mtgame — сообщение один раз на каждое новое значение."""
+    assert game.starts_at is not None
+    venue = hashlib.sha256((game.venue or "").encode()).hexdigest()[:12]
+    return f"match_diff:{match_id}:{game.starts_at:%Y%m%d%H%M}:{venue}"
+
+
+def last_deadline(now: datetime, weekday: int, at: time, tz: str) -> datetime:
+    """Последний наступивший дедлайн фолбэка: weekday в at (время состава), не позже now."""
+    local = to_local(now, tz)
+    day = local.date() - timedelta(days=(local.weekday() - weekday) % 7)
+    deadline = local_to_utc(day, at, tz)
+    return deadline if deadline <= now else local_to_utc(day - timedelta(days=7), at, tz)
 
 
 def search_opens_at(last_game: datetime, weekday: int, at: time, tz: str) -> datetime:
@@ -161,6 +195,105 @@ class MatchService:
         opens = search_opens_at(last, settings.match_search_weekday, settings.match_search_time, tz)
         return now >= opens
 
+    async def _signal_manual_diff(self, squad_id: int, match_id: int, game: ExternalGame) -> None:
+        """Матч в журнале заведён вручную, а на mtgame время или зал другие — тренерам
+        сообщение (один раз на каждое новое значение); сам матч не меняется."""
+        assert game.starts_at is not None
+        async with self._uow_factory() as uow:
+            event = await uow.events.get_by_match(match_id)
+            if event is None or event.starts_at is None:
+                return
+            same_time = event.starts_at == game.starts_at
+            same_place = game.venue is None or event.place == game.venue
+            if same_time and same_place:
+                return
+            if not await uow.system.claim_reminder(match_diff_key(match_id, game), MATCH_DIFF_KIND):
+                return
+            await uow.commit()  # отметка — до рассылки
+            tz = squad_tz(await uow.squads.get(squad_id))
+            text = ru.MATCH_DIFF.format(
+                title=html.escape(event.title),
+                ours=format_local(event.starts_at, tz)
+                + (f", {html.escape(event.place)}" if event.place else ""),
+                theirs=format_local(game.starts_at, tz)
+                + (f", {html.escape(game.venue)}" if game.venue else ""),
+            )
+            await self._recipients.notify(uow, self._notifier, squad_id, Permission.EVENTS, text)
+            await uow.commit()  # dm_available
+        log.info("match_manual_diff", squad_id=squad_id, match_id=match_id)
+
+    # --- фолбэк: к дедлайну матча нет — запрос ручного ввода ---
+    async def fallback_due(self, *, now: datetime | None = None) -> int:
+        """Тик worker-а: составам с mtgame_team_id, у которых к дедлайну в журнале нет матча
+        на ближайшие выходные, — запрос тренерам «введите матч вручную / игры нет». Один раз
+        за неделю; отметка — до рассылки."""
+        now = now or utcnow()
+        sent = 0
+        async with self._uow_factory() as uow:
+            squads = await uow.squads.list_active()
+        for squad in squads:
+            async with self._uow_factory() as uow:
+                settings = await load_squad_settings(uow, squad.id)
+                if (
+                    settings.mtgame_team_id is None
+                    or not settings.features.match_sync
+                    or not settings.features.match_fallback
+                ):
+                    continue
+                deadline = last_deadline(
+                    now,
+                    settings.match_fallback_weekday,
+                    settings.match_fallback_time,
+                    squad.timezone,
+                )
+                if now - deadline > FALLBACK_GRACE:
+                    continue
+                if await uow.events.list_of_type(
+                    EventType.MATCH, deadline, deadline + FALLBACK_WINDOW, [squad.id]
+                ):
+                    continue  # матч на выходные есть (с mtgame или введён вручную)
+                if not await uow.system.claim_reminder(
+                    fallback_key(squad.id, deadline), MATCH_FALLBACK_KIND
+                ):
+                    continue
+                await uow.commit()
+                keyboard = [
+                    [
+                        InlineButton(
+                            ru.MATCH_FALLBACK_BTN_ADD,
+                            callbacks.pack(callbacks.MATCH_FB, callbacks.MATCH_FB_ADD, squad.id),
+                        )
+                    ],
+                    [
+                        InlineButton(
+                            ru.MATCH_FALLBACK_BTN_NONE,
+                            callbacks.pack(callbacks.MATCH_FB, callbacks.MATCH_FB_NONE, squad.id),
+                        )
+                    ],
+                ]
+                text = ru.MATCH_FALLBACK.format(
+                    squad=html.escape(squad.name), team_id=settings.mtgame_team_id
+                )
+                await self._recipients.notify(
+                    uow, self._notifier, squad.id, Permission.EVENTS, text, keyboard=keyboard
+                )
+                await uow.commit()  # dm_available
+                sent += 1
+                log.info("match_fallback_sent", squad_id=squad.id)
+        return sent
+
+    async def confirm_no_game(self, actor: UserContext, squad_id: int) -> None:
+        """«Игры нет» в запросе фолбэка — отметка в журнале аудита."""
+        require(actor, squad_id, Permission.EVENTS)
+        async with self._uow_factory() as uow:
+            await uow.system.audit(
+                actor_user_id=actor.user.id,
+                action="match.no_game",
+                entity="squad",
+                entity_id=squad_id,
+            )
+            await uow.commit()
+
     async def _warn_missing(
         self, squad_id: int, tz: str, scheduled: set[str], now: datetime
     ) -> None:
@@ -201,17 +334,25 @@ class MatchService:
                     game.starts_at + MANUAL_MATCH_WINDOW,
                 )
                 if manual is not None:
+                    # ручная запись — главная: синхронизация её не переносит, только сообщает
+                    match.manual_override = True
                     manual.match_id = match.id
                     await uow.commit()
                     log.info("match_linked_to_manual", event_id=manual.id, match_id=match.id)
+                    await self._signal_manual_diff(squad_id, match.id, game)
                     return 1
                 event = None
             else:
-                if match.manual_override:
+                event = await uow.events.get_by_match(match.id)
+                # заведён вручную (и до появления manual_override) — главная запись
+                entered_by_hand = event is not None and event.created_by_user_id is not None
+                if match.manual_override or entered_by_hand:
+                    self._fill(match, game)
+                    await uow.commit()
+                    await self._signal_manual_diff(squad_id, match.id, game)
                     return 0
                 changed = (match.starts_at, match.venue) != (game.starts_at, game.venue)
                 self._fill(match, game)
-                event = await uow.events.get_by_match(match.id)
                 if event is not None and (event.deleted_at is not None or not changed):
                     # матч удалили из журнала — не возвращаем; без изменений — нечего делать
                     await uow.commit()

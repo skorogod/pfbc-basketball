@@ -18,6 +18,7 @@ from aiogram.fsm.storage.base import StorageKey
 from aiogram.methods import (
     AnswerCallbackQuery,
     DeleteMessage,
+    EditMessageText,
     SendMessage,
     SetMyCommands,
     TelegramMethod,
@@ -35,6 +36,7 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from pfbc_bot import callbacks
 from pfbc_bot.bot.factory import create_dispatcher
 from pfbc_bot.bot.keyboards.common import Choice, ItemAction, SquadPick
 from pfbc_bot.bot.middlewares.access import to_telegram_user
@@ -42,6 +44,7 @@ from pfbc_bot.bot.routers.admin import AdminAction, RoleAction
 from pfbc_bot.bot.routers.events import TournamentLink
 from pfbc_bot.bot.routers.game_payments import DetailsAction, RosterPick
 from pfbc_bot.bot.routers.permissions import PermAction
+from pfbc_bot.bot.states import EventCreation
 from pfbc_bot.domain.dates import local_to_utc
 from pfbc_bot.domain.enums import SquadRole, TrainingStatus
 from pfbc_bot.domain.permissions import Permission
@@ -939,6 +942,38 @@ async def test_forged_confirmation_buttons_leak_nothing(
     assert not any("Секретный зал" in t or "Отменить" in t or "Удалить" in t for t in replies)
     key = StorageKey(bot_id=harness.bot.id, chat_id=PLAYER, user_id=PLAYER)
     assert await harness.dp.storage.get_state(key) is None
+
+
+async def test_match_fallback_buttons(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """Запрос «матч не найден»: «Ввести матч» — сразу диалог создания матча этого состава;
+    «Игры нет» — отметка; игроку кнопки не отвечают."""
+    await bind(harness)
+    for tg_id in (COACH, PLAYER):
+        await harness.member(tg_id, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach = await ctx_of(services, COACH)
+    await services.squads.set_role(admin, squad.id, coach.user.id, SquadRole.COACH, grant=True)
+    add = callbacks.pack(callbacks.MATCH_FB, callbacks.MATCH_FB_ADD, squad.id)
+    none = callbacks.pack(callbacks.MATCH_FB, callbacks.MATCH_FB_NONE, squad.id)
+
+    key = StorageKey(bot_id=harness.bot.id, chat_id=PLAYER, user_id=PLAYER)
+    await harness.press(PLAYER, add)
+    await harness.press(PLAYER, none)
+    assert await harness.dp.storage.get_state(key) is None
+
+    await harness.press(COACH, add)
+    coach_key = StorageKey(bot_id=harness.bot.id, chat_id=COACH, user_id=COACH)
+    assert await harness.dp.storage.get_state(coach_key) == EventCreation.title.state
+    assert (await harness.dp.storage.get_data(coach_key))["type"] == "match"
+
+    await harness.private(COACH, "/cancel")
+    await harness.press(COACH, none)
+    edits = [m.text for m in harness.session.requests if isinstance(m, EditMessageText)]
+    assert edits[-1] == ru.MATCH_FALLBACK_NONE_DONE  # запрос заменён отметкой, кнопок нет
 
 
 async def test_payment_block_only_for_coach(

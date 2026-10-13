@@ -6,7 +6,12 @@ from pfbc_bot.domain.enums import EventType
 from pfbc_bot.integrations.mtgame.client import active_tournament_ids, parse_games
 from pfbc_bot.schemas.events import EventDTO
 from pfbc_bot.schemas.matches import ExternalGame
-from pfbc_bot.services.matches import find_tournament, match_description, search_opens_at
+from pfbc_bot.services.matches import (
+    find_tournament,
+    last_deadline,
+    match_description,
+    search_opens_at,
+)
 
 TEAM_ID = 9410
 
@@ -150,4 +155,15 @@ def test_search_opens_on_tuesday_after_game() -> None:
     tuesday_evening = datetime(2026, 10, 20, 16, 0, tzinfo=UTC)
     assert search_opens_at(tuesday_evening, TUESDAY, NOON, MSK) == datetime(
         2026, 10, 27, 9, 0, tzinfo=UTC
+    )
+
+
+def test_last_deadline_thursday_evening() -> None:
+    thursday, at = 3, time(20, 0)
+    deadline = datetime(2026, 10, 15, 17, 0, tzinfo=UTC)  # чт 20:00 МСК
+    assert last_deadline(deadline, thursday, at, MSK) == deadline
+    assert last_deadline(deadline + timedelta(days=2), thursday, at, MSK) == deadline  # сб
+    # чт 19:00 — дедлайн этой недели ещё не наступил: прошлый четверг
+    assert last_deadline(deadline - timedelta(hours=1), thursday, at, MSK) == deadline - timedelta(
+        days=7
     )

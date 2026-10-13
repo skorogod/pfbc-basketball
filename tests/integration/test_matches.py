@@ -202,7 +202,95 @@ async def test_manual_match_is_linked_not_duplicated(
     assert await services.matches.sync(now=NOW) == 1
     [event] = await match_events(uow_factory)
     assert event.id == manual.id and event.match_id is not None
-    assert notifier.messages == [] and notifier.polls == []
+    assert notifier.polls == []  # второй пост и опрос не публикуются
+    assert notifier.to(CHAT_ID) == []
+    # ручная запись главная: время не меняется, тренеру (нет тренера — админу) — расхождение
+    assert event.starts_at == KICKOFF + timedelta(hours=1)
+    [diff] = notifier.to(ADMIN_TG_ID)
+    assert "данные отличаются" in diff.text
+    assert "вс 18.10.2026 13:30" in diff.text and "вс 18.10.2026 12:30" in diff.text
+
+    # те же данные mtgame — повторно не сообщаем; лига перенесла — новое сообщение, матч цел
+    await monitor(services, squad_id)
+    await services.matches.sync(now=NOW + timedelta(minutes=30))
+    assert len(notifier.to(ADMIN_TG_ID)) == 1
+    source.games = [replace(SCHEDULED, starts_at=KICKOFF + timedelta(hours=3))]
+    await services.matches.sync(now=NOW + timedelta(hours=1))
+    assert len(notifier.to(ADMIN_TG_ID)) == 2 and "15:30" in notifier.to(ADMIN_TG_ID)[-1].text
+    [event] = await match_events(uow_factory)
+    assert event.starts_at == KICKOFF + timedelta(hours=1) and notifier.stopped_polls == []
+
+
+async def test_same_manual_match_needs_no_signal(
+    services: Services, notifier: FakeNotifier, source: FakeSource, squad_id: int
+) -> None:
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    await services.events.create(
+        admin,
+        EventCreate(
+            squad_id=squad_id,
+            type=EventType.MATCH,
+            title="Матч",
+            starts_at=KICKOFF,
+            place=VENUE,
+            duration_minutes=120,
+        ),
+        now=NOW,
+    )
+    source.games = [SCHEDULED]
+    await services.matches.sync(now=NOW)
+    assert notifier.messages == []  # совпадает — сообщать не о чем
+
+
+THURSDAY_2005 = datetime(2026, 10, 15, 17, 5, tzinfo=UTC)  # чт 20:05 МСК
+
+
+async def test_fallback_asks_coach_to_enter_match(
+    services: Services, notifier: FakeNotifier, squad_id: int
+) -> None:
+    await join(services, COACH, at=NOW - timedelta(days=30), role=SquadRole.COACH)
+    # до дедлайна (чт 19:00 МСК) — рано
+    assert await services.matches.fallback_due(now=THURSDAY_2005 - timedelta(hours=1)) == 0
+    assert await services.matches.fallback_due(now=THURSDAY_2005) == 1
+    [request] = notifier.to(COACH)
+    assert "не найден автоматически" in request.text
+    buttons = request.buttons()
+    assert buttons[ru.MATCH_FALLBACK_BTN_ADD] == f"mfb:add:{squad_id}"
+    assert buttons[ru.MATCH_FALLBACK_BTN_NONE] == f"mfb:none:{squad_id}"
+    # один раз за неделю
+    assert await services.matches.fallback_due(now=THURSDAY_2005 + timedelta(hours=1)) == 0
+    # через неделю матча снова нет — новый запрос
+    assert await services.matches.fallback_due(now=THURSDAY_2005 + timedelta(days=7)) == 1
+
+
+async def test_fallback_skipped_when_match_known_or_stale(
+    services: Services, notifier: FakeNotifier, squad_id: int
+) -> None:
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    # пропущен больше чем на 12 часов (worker был выключен) — не шлём
+    assert await services.matches.fallback_due(now=THURSDAY_2005 + timedelta(hours=13)) == 0
+    # матч на выходные есть (введён вручную или найден) — запрос не нужен
+    await services.events.create(
+        admin,
+        EventCreate(
+            squad_id=squad_id,
+            type=EventType.MATCH,
+            title="Матч",
+            starts_at=THURSDAY_2005 + timedelta(days=2),
+            duration_minutes=120,
+        ),
+        now=THURSDAY_2005 - timedelta(days=1),
+    )
+    assert await services.matches.fallback_due(now=THURSDAY_2005 + timedelta(days=7)) == 1
+    assert await services.matches.fallback_due(now=THURSDAY_2005) == 0
+    # выключено флагом
+    await services.settings.set_squad_value(admin, squad_id, "features.match_fallback", "false")
+    assert await services.matches.fallback_due(now=THURSDAY_2005 + timedelta(days=14)) == 0
+
+
+async def test_fallback_only_for_synced_squads(services: Services, notifier: FakeNotifier) -> None:
+    await setup_squad(services)  # без mtgame_team_id — матчи ведутся вручную, запроса нет
+    assert await services.matches.fallback_due(now=THURSDAY_2005) == 0
 
 
 async def test_linked_to_journal_tournament(

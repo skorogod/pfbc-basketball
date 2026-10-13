@@ -29,6 +29,11 @@ REVIEW_OK = "ok"  # review:ok:<match_event_id>:<unix-время> — назна�
 REVIEW_TIME = "time"  # review:time:<match_event_id> — ввести другое время
 REVIEW_NO = "no"  # review:no:<match_event_id> — разбор не нужен
 
+# Фолбэк ФТ-4: к дедлайну матча на выходные нет — тренеру (личка):
+MATCH_FB = "mfb"
+MATCH_FB_ADD = "add"  # mfb:add:<squad_id> — ввести матч вручную (диалог /event_add, тип «Матч»)
+MATCH_FB_NONE = "none"  # mfb:none:<squad_id> — игры на этих выходных нет
+
 # «Отметились N игроков» — тренеру/админу (личка): начать сбор денег за игру.
 ROSTER = "roster"
 ROSTER_START = "start"  # roster:start:<match_event_id> — спросить «голосование закроется?»

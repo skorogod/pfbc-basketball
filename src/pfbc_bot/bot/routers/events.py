@@ -252,6 +252,31 @@ async def _start(
     )
 
 
+@router.callback_query(F.data.startswith(f"{callbacks.MATCH_FB}:"))
+async def on_match_fallback(
+    callback: CallbackQuery, ctx: UserContext, services: Services, state: FSMContext
+) -> None:
+    """Запрос фолбэка ФТ-4 «матч не найден»: ввести матч вручную (сразу тип «Матч») или
+    отметить, что игры нет."""
+    parsed = callbacks.parse(callback.data or "")
+    squad_id = parsed.args[0]
+    message = callback_message(callback)
+    if parsed.action == callbacks.MATCH_FB_NONE:
+        await services.matches.confirm_no_game(ctx, squad_id)
+        await callback.answer()
+        if message is not None:
+            await message.edit_text(ru.MATCH_FALLBACK_NONE_DONE, reply_markup=None)
+        return
+    squad = await picked_squad(ctx, services, squad_id, Permission.EVENTS)
+    await callback.answer()
+    if message is None:
+        return
+    await message.edit_reply_markup(reply_markup=None)
+    await state.clear()
+    await state.update_data(squad_id=squad.id, tz=squad.timezone)
+    await _choose_type(message, ctx, services, state, EventType.MATCH)
+
+
 async def _start_review(message: Message, squad: SquadDTO, state: FSMContext) -> None:
     """Разбор игры — тот же сценарий события, но тип уже выбран."""
     await state.clear()

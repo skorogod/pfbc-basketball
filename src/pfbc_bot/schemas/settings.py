@@ -25,6 +25,8 @@ class Features(BaseModel):
     # следить за найденными матчами до игры (переносы, отмены): mtgame опрашивается всегда, а не
     # только пока ищется следующая игра
     match_monitoring: bool = False
+    # фолбэк: к дедлайну матча на выходные нет — тренерам запрос ручного ввода
+    match_fallback: bool = True
 
 
 class SquadSettings(BaseModel):
@@ -36,6 +38,9 @@ class SquadSettings(BaseModel):
     # и до появления даты следующей: лига назначает её обычно во вторник вечером
     match_search_weekday: int = Field(default=1, ge=0, le=6)
     match_search_time: time = time(12, 0)
+    # дедлайн фолбэка (день недели, 0 — пн, и время состава): матча на выходные нет — запрос
+    match_fallback_weekday: int = Field(default=3, ge=0, le=6)
+    match_fallback_time: time = time(20, 0)
     training_poll_time: time = time(9, 0)
     # «ранняя» тренировка — начинается не позже early_training_until (включительно): опрос
     # накануне в training_poll_eve_time, дежурные и сообщения о них — утром в duty_morning_time
