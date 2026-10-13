@@ -39,6 +39,7 @@ in_private = F.chat.type == ChatType.PRIVATE
 ROLES_FLOW, SETTINGS_SHOW_FLOW, SETTINGS_SET_FLOW = "roles", "settings_show", "settings_set"
 ADMIN_ADD_FLOW = "admin_add"
 MEMBERS_FLOW = "squad_members"
+MEMBER_CARD_FLOW = "member"
 MESSAGE_LIMIT = 4000  # лимит сообщения Telegram — 4096 символов
 BUTTONS_LIMIT = 90  # кнопок в одном сообщении (лимит Telegram — 100)
 
@@ -46,7 +47,7 @@ BUTTONS_LIMIT = 90  # кнопок в одном сообщении (лимит 
 class RoleAction(CallbackData, prefix="rl"):
     squad_id: int
     user_id: int
-    action: str  # "open" | "<role>-1" (выдать) | "<role>-0" (снять)
+    action: str  # "open" | "view" (без смены ролей, /member) | "<role>-1" (выдать) | "<role>-0"
 
 
 async def _admin_only(callback: CallbackQuery, ctx: UserContext) -> bool:
@@ -181,12 +182,6 @@ async def on_squad_members(
     ]
     for chunk in _chunks(lines):
         await message.answer(chunk)
-    # карточка участника — по кнопке (та же, что в /roles)
-    for start in range(0, len(members), BUTTONS_LIMIT):
-        await message.answer(
-            ru.SQUAD_MEMBERS_OPEN_CARD,
-            reply_markup=_member_buttons(members[start : start + BUTTONS_LIMIT], squad),
-        )
 
 
 def _member_line(view: SquadMemberView, is_admin: bool) -> str:
@@ -209,6 +204,43 @@ def _chunks(lines: list[str]) -> list[str]:
             current = ""
         current = f"{current}\n{line}" if current else line
     return [*chunks, current] if current else chunks
+
+
+# --- карточка участника (только просмотр) ---
+@router.message(Command("member"), in_private)
+async def cmd_member(message: Message, ctx: UserContext, services: Services) -> None:
+    if not ctx.is_admin:
+        await message.answer(ru.NO_PERMISSION)
+        return
+    if squad := await ask_squad(message, ctx, services, MEMBER_CARD_FLOW):
+        await _show_member_cards(message, squad, services)
+
+
+@router.callback_query(SquadPick.filter(F.flow == MEMBER_CARD_FLOW))
+async def on_member_squad(
+    callback: CallbackQuery, callback_data: SquadPick, ctx: UserContext, services: Services
+) -> None:
+    if not await _admin_only(callback, ctx):
+        return
+    await callback.answer()
+    if message := callback_message(callback):
+        squad = await services.squads.get(callback_data.squad_id)
+        await _show_member_cards(message, squad, services)
+
+
+async def _show_member_cards(message: Message, squad: SquadDTO, services: Services) -> None:
+    members = await services.squads.members(squad.id)
+    if not members:
+        await message.answer(ru.SQUAD_MEMBERS_EMPTY.format(squad=html.escape(squad.name)))
+        return
+    members.sort(key=lambda m: m.user.display_name.lower())
+    for start in range(0, len(members), BUTTONS_LIMIT):  # в сообщении — не больше 100 кнопок
+        await message.answer(
+            ru.MEMBER_CHOOSE.format(squad=html.escape(squad.name)),
+            reply_markup=_member_buttons(
+                members[start : start + BUTTONS_LIMIT], squad, action="view"
+            ),
+        )
 
 
 # --- роли ---
@@ -243,15 +275,17 @@ async def _show_members(message: Message, squad: SquadDTO, services: Services) -
     )
 
 
-def _member_buttons(members: list[SquadMemberView], squad: SquadDTO) -> InlineKeyboardMarkup:
-    """По кнопке на участника — открывает его карточку."""
+def _member_buttons(
+    members: list[SquadMemberView], squad: SquadDTO, *, action: str = "open"
+) -> InlineKeyboardMarkup:
+    """По кнопке на участника — открывает его карточку (open — с кнопками ролей)."""
     builder = InlineKeyboardBuilder()
     for m in members:
         staff = m.roles & STAFF_ROLES
         label = m.user.display_name + (f" · {_roles_text(staff)}" if staff else "")
         builder.button(
             text=label[:60],
-            callback_data=RoleAction(squad_id=squad.id, user_id=m.user.id, action="open"),
+            callback_data=RoleAction(squad_id=squad.id, user_id=m.user.id, action=action),
         )
     builder.adjust(1)
     return builder.as_markup()
@@ -265,7 +299,7 @@ async def on_role_action(
         return
     message = callback_message(callback)
     squad = await services.squads.get(callback_data.squad_id)
-    if callback_data.action == "open":
+    if callback_data.action in ("open", "view"):
         members = await services.squads.members(squad.id)
         view = next((m for m in members if m.user.id == callback_data.user_id), None)
         if view is None:
@@ -275,7 +309,9 @@ async def on_role_action(
         if message is not None:
             await message.answer(
                 _role_card(view, squad, services.admins.is_admin_user(view.user)),
-                reply_markup=_role_keyboard(view, squad),
+                reply_markup=_role_keyboard(view, squad)
+                if callback_data.action == "open"
+                else None,
             )
         return
 

@@ -362,7 +362,7 @@ async def show_attendance_choice(message: Message, squad: SquadDTO, services: Se
         for e in events:
             when = format_short(e, squad.timezone)
             builder.button(
-                text=f"📅 {when} {EVENT_TYPE_TITLES[e.type]}: {e.title}"[:60],
+                text=f"🗓 {when} {EVENT_TYPE_TITLES[e.type]}: {e.title}"[:60],
                 callback_data=ItemAction(kind="ev", action="att", item_id=e.id),
             )
         builder.adjust(1)

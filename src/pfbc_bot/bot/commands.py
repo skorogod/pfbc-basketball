@@ -46,6 +46,7 @@ COMMANDS_BY_PERMISSION: dict[Permission, list[BotCommand]] = {
 ADMIN_COMMANDS = [
     BotCommand(command="squads", description="Составы"),
     BotCommand(command="roles", description="Роли: тренер, капитан"),
+    BotCommand(command="member", description="Карточка участника"),
     BotCommand(command="admins", description="Админы бота"),
     BotCommand(command="permissions", description="Права ролей"),
     BotCommand(command="settings", description="Настройки"),

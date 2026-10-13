@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from pfbc_bot.bot.factory import create_dispatcher
 from pfbc_bot.bot.keyboards.common import Choice, ItemAction, SquadPick
 from pfbc_bot.bot.middlewares.access import to_telegram_user
-from pfbc_bot.bot.routers.admin import MEMBERS_FLOW, AdminAction, RoleAction
+from pfbc_bot.bot.routers.admin import AdminAction, RoleAction
 from pfbc_bot.bot.routers.events import TournamentLink
 from pfbc_bot.bot.routers.game_payments import DetailsAction, RosterPick
 from pfbc_bot.bot.routers.permissions import PermAction
@@ -234,8 +234,7 @@ async def test_roles_invite_and_settings_in_private_chat(
     await harness.private(ADMIN_TG_ID, "/squads")
     members_btn = SquadPick(flow="squad_members", squad_id=squad.id).pack()
     await harness.press(ADMIN_TG_ID, members_btn)
-    listing, open_card = harness.session.texts_to(ADMIN_TG_ID)[-2:]
-    assert open_card == ru.SQUAD_MEMBERS_OPEN_CARD  # следом — кнопки карточек участников
+    listing = harness.session.texts_to(ADMIN_TG_ID)[-1]
     assert listing.startswith("<b>Участники состава Взрослые</b> — 3:")
     assert (
         "\n1. " in listing and "user100 (не в боте) — тренер · ⚠️ не зарегистрирован(а)" in listing
@@ -1102,24 +1101,23 @@ async def test_admin_sees_member_details(
     await harness.group(5, "Всем привет!")
     old_timer = await ctx_of(services, 5)
 
-    # /squads → «Участники» → кнопка участника открывает ту же карточку
-    await harness.private(ADMIN_TG_ID, "/squads")
-    await harness.press(ADMIN_TG_ID, SquadPick(flow=MEMBERS_FLOW, squad_id=squad.id).pack())
-    [markup] = [
-        m.reply_markup
-        for m in harness.session.requests
-        if isinstance(m, SendMessage) and m.text == ru.SQUAD_MEMBERS_OPEN_CARD
-    ]
+    # /member → (состав один — сразу) кнопки участников → карточка без кнопок смены ролей
+    await harness.private(PLAYER, "/member")
+    assert harness.session.texts_to(PLAYER)[-1] == ru.NO_PERMISSION
+    await harness.private(ADMIN_TG_ID, "/member")
+    markup = harness.session.requests[-1].reply_markup  # type: ignore[attr-defined]
+    assert harness.session.texts_to(ADMIN_TG_ID)[-1] == ru.MEMBER_CHOOSE.format(squad=squad.name)
     buttons = {
         b.callback_data
         for row in markup.inline_keyboard  # type: ignore[union-attr]
         for b in row
     }
-    open_player = RoleAction(squad_id=squad.id, user_id=player.user.id, action="open").pack()
-    open_old = RoleAction(squad_id=squad.id, user_id=old_timer.user.id, action="open").pack()
+    open_player = RoleAction(squad_id=squad.id, user_id=player.user.id, action="view").pack()
+    open_old = RoleAction(squad_id=squad.id, user_id=old_timer.user.id, action="view").pack()
     assert {open_player, open_old} <= buttons
     await harness.press(ADMIN_TG_ID, open_player)
     card = harness.session.texts_to(ADMIN_TG_ID)[-1]
+    assert harness.session.requests[-1].reply_markup is None  # type: ignore[attr-defined]
     assert "Реквизиты:\n• " in card and "4111 1111 1111 1111" in card and "Т-Банк" in card
     await harness.press(ADMIN_TG_ID, open_old)
     card = harness.session.texts_to(ADMIN_TG_ID)[-1]
