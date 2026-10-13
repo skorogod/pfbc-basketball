@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 
+from sqlalchemy.exc import IntegrityError
+
 from pfbc_bot import callbacks
 from pfbc_bot.db.models import Event, GamePayment, Poll, RosterNotice, User
 from pfbc_bot.domain.dates import (
@@ -464,6 +466,11 @@ class GamePaymentService:
         return changed
 
     async def _roster_update(self, match_id: int, now: datetime) -> int:
+        """В три фазы, как остальные задачи: (1) отметка в БД и commit — новые строки
+        уведомлений (уникальность «опрос + получатель» не даст второму worker создать их ещё
+        раз) или новое число в существующих; (2) отправка и правка в Telegram — вне транзакции;
+        (3) результат (message_id, недоставлено). Сбой между фазами — сообщение скорее не уйдёт,
+        чем уйдёт дважды."""
         async with self._uow_factory() as uow:
             match = await uow.events.get(match_id)
             if match is None or match.starts_at is None or match.starts_at <= now:
@@ -487,60 +494,66 @@ class GamePaymentService:
             text = format_roster_notice(
                 event, tz, count, settings, await _game_price(uow, match) is not None, now
             )
-            keyboard = _start_keyboard(match.id)
-            if notices:
-                await self._edit_notices(notices, text, keyboard, count)
+            edit = bool(notices)
+            if edit:
+                for notice in notices:
+                    notice.players = count
+                    if _deliverable(notice):
+                        notice.text = text
             else:
-                await self._send_notices(uow, match, poll.id, text, keyboard, count, now)
+                notices = [
+                    await uow.game_payments.add_notice(
+                        RosterNotice(
+                            event_id=match.id,
+                            poll_id=poll.id,
+                            user_id=user.id,
+                            chat_id=user.tg_user_id,
+                            message_id=None,  # ещё не отправлено
+                            text=text,
+                            players=count,
+                        )
+                    )
+                    for user in await self._roster_recipients(uow, match.squad_id)
+                ]
+            try:
+                await uow.commit()
+            except IntegrityError:  # уведомления по опросу уже завёл параллельный worker
+                await uow.rollback()
+                return 0
+            pending = [
+                (n.id, n.chat_id, n.message_id) for n in notices if _deliverable(n) or not edit
+            ]
+        results = await self._deliver_notices(pending, text, _start_keyboard(match_id))
+        async with self._uow_factory() as uow:
+            for notice_id, message_id in results.items():
+                stored = await uow.game_payments.get_notice(notice_id)
+                if stored is None:
+                    continue
+                if message_id is not None:
+                    stored.message_id = message_id
+                elif stored.message_id is None:  # первое сообщение не дошло — не повторяем
+                    stored.hidden_at = now
+                if user := await uow.users.get(stored.user_id):
+                    user.dm_available = stored.message_id is not None
             await uow.commit()
-        log.info("roster_notice", event_id=match_id, players=count, edited=bool(notices))
+        log.info("roster_notice", event_id=match_id, players=count, edited=edit)
         return 1
 
-    async def _send_notices(
-        self,
-        uow: UnitOfWork,
-        match: Event,
-        poll_id: int,
-        text: str,
-        keyboard: Keyboard,
-        count: int,
-        now: datetime,
-    ) -> None:
-        """Первое сообщение — каждому получателю; запоминается и недоставленное: число учтено,
-        повторять каждую минуту незачем."""
-        for user in await self._roster_recipients(uow, match.squad_id):
-            message_id = await self._notifier.send_message(user.tg_user_id, text, keyboard=keyboard)
-            user.dm_available = message_id is not None
-            await uow.game_payments.add_notice(
-                RosterNotice(
-                    event_id=match.id,
-                    poll_id=poll_id,
-                    user_id=user.id,
-                    chat_id=user.tg_user_id,
-                    message_id=message_id,
-                    text=text,
-                    players=count,
-                    hidden_at=None if message_id is not None else now,
-                )
-            )
-
-    async def _edit_notices(
-        self, notices: list[RosterNotice], text: str, keyboard: Keyboard, count: int
-    ) -> None:
-        """Новое число — правкой того же сообщения (без уведомления). Не вышло (сообщение
-        удалили) — новым сообщением, дальше правится оно."""
-        for notice in notices:
-            notice.players = count
-            if notice.hidden_at is not None or notice.message_id is None:
-                continue
-            notice.text = text
-            if await self._notifier.edit_message(
-                notice.chat_id, notice.message_id, text, keyboard=keyboard
+    async def _deliver_notices(
+        self, pending: list[tuple[int, int, int | None]], text: str, keyboard: Keyboard
+    ) -> dict[int, int | None]:
+        """notice_id → новый message_id (None — сообщение не отправлялось или не дошло).
+        Есть сообщение — правка (без уведомления); правка не прошла (сообщение удалили) или
+        сообщения ещё нет — новое сообщение."""
+        results: dict[int, int | None] = {}
+        for notice_id, chat_id, message_id in pending:
+            if message_id is not None and await self._notifier.edit_message(
+                chat_id, message_id, text, keyboard=keyboard
             ):
+                results[notice_id] = None
                 continue
-            message_id = await self._notifier.send_message(notice.chat_id, text, keyboard=keyboard)
-            if message_id is not None:
-                notice.message_id = message_id
+            results[notice_id] = await self._notifier.send_message(chat_id, text, keyboard=keyboard)
+        return results
 
     async def _roster_recipients(self, uow: UnitOfWork, squad_id: int) -> list[User]:
         """Тренерам (право сбора денег) и админам — участникам состава; нет таких — корневым
@@ -865,6 +878,11 @@ async def _game_price(uow: UnitOfWork, match: Event) -> Decimal | None:
 def _suggestion(price: Decimal, players: int) -> AmountSuggestion:
     per_player = (price / players).to_integral_value(rounding=ROUND_CEILING)
     return AmountSuggestion(game_price=price, players=players, per_player=per_player)
+
+
+def _deliverable(notice: RosterNotice) -> bool:
+    """Сообщение с кнопкой есть и кнопка не снята — его можно править."""
+    return notice.hidden_at is None and notice.message_id is not None
 
 
 def _start_keyboard(match_id: int) -> Keyboard:

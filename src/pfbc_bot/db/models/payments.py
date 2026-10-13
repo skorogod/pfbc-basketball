@@ -110,6 +110,8 @@ class RosterNotice(IdMixin, CreatedAtMixin, Base):
     чтобы снять кнопку, когда число изменилось или сбор начат; players — число в сообщении."""
 
     __tablename__ = "roster_notices"
+    # одно уведомление на получателя по опросу — второй worker не задвоит сообщение
+    __table_args__ = (UniqueConstraint("poll_id", "user_id"),)
 
     event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
     poll_id: Mapped[int] = mapped_column(ForeignKey("polls.id", ondelete="CASCADE"), index=True)

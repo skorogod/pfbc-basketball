@@ -1,6 +1,7 @@
 """Заявка на игру: «Буду (игрок)» отметили N → тренеру «Начать сбор»; заявка (до 12) —
 источник истины для суммы, напоминаний и «все оплатили»; «Состав на матч» в группе."""
 
+import asyncio
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 
@@ -159,6 +160,35 @@ async def test_notice_is_edited_in_place(
     assert len(notices(notifier, COACH)) == 2
     last_id = notifier.to(COACH)[-1].message_id
     assert any(mid == last_id and "<b>13</b>" in text for _, mid, text in notifier.edits)
+
+
+async def test_two_workers_do_not_duplicate_notice(
+    services: Services, notifier: FakeNotifier, uow_factory: UowFactory, match_id: int
+) -> None:
+    """Второй worker на той же БД: уникальность (опрос, получатель) — по сообщению на
+    получателя, а не по два."""
+    await vote(services, range(1, 11))
+    other = build_services(uow_factory, notifier, [ADMIN_TG_ID])
+    await asyncio.gather(
+        services.game_payments.send_roster_updates(now=NOW),
+        other.game_payments.send_roster_updates(now=NOW),
+    )
+    assert len(notices(notifier, COACH)) == 1
+    assert len(notices(notifier, ADMIN_TG_ID)) == 1
+
+
+async def test_crash_while_sending_does_not_repeat(
+    services: Services, notifier: FakeNotifier, match_id: int
+) -> None:
+    """Отметка — до отправки: worker упал посреди рассылки — следующий тик не повторяет
+    (сообщение скорее не уйдёт, чем уйдёт дважды)."""
+    await vote(services, range(1, 11))
+    notifier.crash_on = {notifier._attempts + 1}  # первое же уведомление
+    with pytest.raises(RuntimeError):
+        await services.game_payments.send_roster_updates(now=NOW)
+    await services.game_payments.send_roster_updates(now=NOW + timedelta(minutes=1))
+    sent = len(notices(notifier, COACH)) + len(notices(notifier, ADMIN_TG_ID))
+    assert sent == 0  # не дошло, но и не задвоилось
 
 
 async def test_threshold_setting(services: Services, notifier: FakeNotifier, match_id: int) -> None:
