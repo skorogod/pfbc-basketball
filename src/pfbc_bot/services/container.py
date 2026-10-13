@@ -10,10 +10,11 @@ from pfbc_bot.services.birthdays import BirthdayService
 from pfbc_bot.services.duty import DutyService
 from pfbc_bot.services.events import EventService
 from pfbc_bot.services.game_payments import GamePaymentService
+from pfbc_bot.services.matches import MatchService
 from pfbc_bot.services.membership import MembershipService
 from pfbc_bot.services.permissions import PermissionService, Recipients
 from pfbc_bot.services.polls import PollService
-from pfbc_bot.services.ports import Notifier
+from pfbc_bot.services.ports import MatchSource, Notifier
 from pfbc_bot.services.receipts import ReceiptService
 from pfbc_bot.services.registration import RegistrationService
 from pfbc_bot.services.settings import SettingsService
@@ -34,13 +35,17 @@ class Services:
     polls: PollService
     birthdays: BirthdayService
     events: EventService
+    matches: MatchService
     game_payments: GamePaymentService
     receipts: ReceiptService
     permissions: PermissionService
 
 
 def build_services(
-    uow_factory: UowFactory, notifier: Notifier, admin_tg_ids: Iterable[int]
+    uow_factory: UowFactory,
+    notifier: Notifier,
+    admin_tg_ids: Iterable[int],
+    match_source: MatchSource | None = None,
 ) -> Services:
     admin_ids = frozenset(admin_tg_ids)
     recipients = Recipients(admin_ids)
@@ -48,6 +53,7 @@ def build_services(
     game_payments = GamePaymentService(uow_factory, notifier, recipients)
     receipts = ReceiptService(uow_factory, notifier)
     membership = MembershipService(uow_factory, notifier, admin_ids, duty=duty)
+    events = EventService(uow_factory, notifier, recipients)
     return Services(
         access=AccessService(uow_factory, admin_ids),
         admins=AdminService(uow_factory, admin_ids),
@@ -59,7 +65,8 @@ def build_services(
         duty=duty,
         polls=PollService(uow_factory, notifier, duty, membership, game_payments, receipts),
         birthdays=BirthdayService(uow_factory, notifier),
-        events=EventService(uow_factory, notifier, recipients),
+        events=events,
+        matches=MatchService(uow_factory, notifier, events, match_source, recipients, admin_ids),
         game_payments=game_payments,
         receipts=receipts,
         permissions=PermissionService(uow_factory),

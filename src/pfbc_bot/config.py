@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     web_port: int = 8080
 
     default_timezone: str = "Europe/Moscow"
+    mtgame_base_url: str = "https://mtgame.ru"  # матчи ABL (ФТ-4)
     log_level: str = "INFO"
 
     @field_validator("admin_tg_ids", mode="before")

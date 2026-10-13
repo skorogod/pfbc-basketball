@@ -21,11 +21,21 @@ class Features(BaseModel):
     event_reminders: bool = True
     review_offers: bool = True  # после матча — тренеру предложение назначить разбор
     receipt_reminders: bool = True  # ежемесячный опрос «прислали квитанцию тренеру?»
+    match_sync: bool = True  # матчи с mtgame.ru: пост и опрос участия в топике match
+    # следить за найденными матчами до игры (переносы, отмены): mtgame опрашивается всегда, а не
+    # только пока ищется следующая игра
+    match_monitoring: bool = False
 
 
 class SquadSettings(BaseModel):
     model_config = ConfigDict(extra="ignore")  # устаревшие ключи в БД не ломают загрузку
 
+    # id команды на mtgame.ru (mtgame.ru/team/<id>) — оттуда берутся матчи ABL; null — нет
+    mtgame_team_id: int | None = Field(default=None, ge=1)
+    # поиск следующей игры на mtgame — с этого дня недели (0 — пн) и времени после сыгранной игры
+    # и до появления даты следующей: лига назначает её обычно во вторник вечером
+    match_search_weekday: int = Field(default=1, ge=0, le=6)
+    match_search_time: time = time(12, 0)
     training_poll_time: time = time(9, 0)
     # «ранняя» тренировка — начинается не позже early_training_until (включительно): опрос
     # накануне в training_poll_eve_time, дежурные и сообщения о них — утром в duty_morning_time

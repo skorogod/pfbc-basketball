@@ -355,7 +355,10 @@ CONFLICT_EVENT = "{type}: {title}"
 EVENT_CREATED = "✅ Событие добавлено:\n{event}"
 EVENT_PUBLISHED = "Опубликовано в группе состава."
 EVENT_PUBLISHED_WITH_POLL = "Опубликовано в группе состава вместе с опросом участия."
-EVENT_MOVED_GROUP = "🔁 <b>Перенесено — {type}: {title}</b>\n🕒 {old} → <b>{new}</b>{tournament}"
+EVENT_MOVED_GROUP = (
+    "🔁 <b>Перенесено — {type}: {title}</b>\n🕒 {old} → <b>{new}</b>{place}{tournament}"
+)
+EVENT_PLACE_CHANGED = "📍 <b>Новое место — {type}: {title}</b>\n🕒 {when}\n📍 <b>{place}</b>"
 EVENT_MOVE_PAST = "Перенести можно только будущее событие и только на будущее время."
 EVENT_MOVE_CHOOSE = "Какое событие перенести?"
 EVENT_MOVE_ASK_WHEN = (
@@ -628,3 +631,17 @@ DETAILS_BTN_CONFIRM_DELETE = "Да, удалить"
 DETAILS_DELETED = "Реквизиты удалены."
 DETAILS_LIMIT = "Можно сохранить не больше {limit} реквизитов — удалите ненужные в /profile."
 DETAILS_NOT_FOUND = "Реквизиты не найдены — возможно, их уже удалили."
+
+# --- матчи из mtgame (ФТ-4) ---
+# описание матча: «Москвич, тур 7»; если матч привязан к турниру журнала — «Тур 7»
+MATCH_TOUR = "тур {tour}"
+MATCH_STAGE = "плей-офф: {stage}"
+MATCH_SOURCE_FAILED = (
+    "⚠️ Не удалось получить матчи состава «{squad}» с mtgame.ru (команда {team_id}): {error}\n"
+    "Пока сайт недоступен, матч можно добавить вручную: /event_add."
+)
+MATCH_GONE = (
+    "⚠️ <b>{title}</b>, {when}: на mtgame.ru игра пропала из расписания или у неё сняли дату — "
+    "возможно, её отменили или переносят. Уточните у лиги; если игры не будет — удалите матч: "
+    "/event_del"
+)

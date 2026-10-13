@@ -31,6 +31,20 @@ class EventsRepository:
             await self._session.scalars(select(Event).where(Event.match_id == match_id))
         ).first()
 
+    async def find_unlinked_match(
+        self, squad_id: int, start: datetime, end: datetime
+    ) -> Event | None:
+        """Матч, заведённый вручную (без записи в matches), со стартом в [start, end)."""
+        stmt = select(Event).where(
+            Event.deleted_at.is_(None),
+            Event.squad_id == squad_id,
+            Event.type == EventType.MATCH,
+            Event.match_id.is_(None),
+            Event.starts_at >= start,
+            Event.starts_at < end,
+        )
+        return (await self._session.scalars(stmt.order_by(Event.starts_at))).first()
+
     async def list_between(
         self, start: datetime, end: datetime, squad_ids: Sequence[int] | None = None
     ) -> list[Event]:

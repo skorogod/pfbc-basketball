@@ -8,6 +8,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from pfbc_bot.schemas.matches import ExternalGame
+
 
 @dataclass(frozen=True, slots=True)
 class InlineButton:
@@ -68,4 +70,15 @@ class Notifier(Protocol):
 
     async def is_chat_member(self, chat_id: int, tg_user_id: int) -> bool | None:
         """True/False — состоит ли пользователь в чате; None — проверить не удалось."""
+        ...
+
+
+class MatchSourceError(Exception):
+    """Источник матчей недоступен или изменил формат ответа."""
+
+
+class MatchSource(Protocol):
+    async def upcoming_games(self, team_id: int) -> list[ExternalGame]:
+        """Несыгранные игры команды в идущих турнирах (в том числе ещё без даты и места).
+        Сбой — MatchSourceError."""
         ...

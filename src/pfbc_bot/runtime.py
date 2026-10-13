@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from pfbc_bot.config import Settings
 from pfbc_bot.db.session import create_engine, create_session_factory
+from pfbc_bot.integrations.mtgame.client import MtgameSource
 from pfbc_bot.integrations.telegram.notifier import TelegramNotifier
 from pfbc_bot.repositories.uow import make_uow_factory
 from pfbc_bot.services.container import Services, build_services
@@ -21,9 +22,11 @@ class Runtime:
     engine: AsyncEngine
     session_factory: async_sessionmaker[AsyncSession]
     services: Services
+    mtgame: MtgameSource
 
     async def close(self) -> None:
         await self.bot.session.close()
+        await self.mtgame.close()
         await self.engine.dispose()
 
 
@@ -40,5 +43,14 @@ async def build_runtime(settings: Settings) -> Runtime:
     engine = create_engine(settings.database_url)
     session_factory = create_session_factory(engine)
     notifier = TelegramNotifier(bot, me.username or "")
-    services = build_services(make_uow_factory(session_factory), notifier, settings.admin_tg_ids)
-    return Runtime(bot=bot, engine=engine, session_factory=session_factory, services=services)
+    mtgame = MtgameSource(settings.mtgame_base_url)
+    services = build_services(
+        make_uow_factory(session_factory), notifier, settings.admin_tg_ids, mtgame
+    )
+    return Runtime(
+        bot=bot,
+        engine=engine,
+        session_factory=session_factory,
+        services=services,
+        mtgame=mtgame,
+    )

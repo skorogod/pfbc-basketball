@@ -333,12 +333,25 @@ class EventService:
         """Перенос события (для турнира — даты старта). Команда получает новое сообщение
         о переносе, опрос участия публикуется заново (старый закрывается — время другое),
         напоминания пересчитываются по новой дате."""
-        now = now or utcnow()
+        return await self._move(event_id, new_starts_at, actor=actor, now=now or utcnow())
+
+    async def _move(
+        self,
+        event_id: int,
+        new_starts_at: datetime,
+        *,
+        actor: UserContext | None,
+        now: datetime,
+        place: str | None = None,
+    ) -> EventDTO:
+        """actor None — перенос из источника матчей (права не проверяются); place — новое
+        место, если оно тоже изменилось."""
         async with self._uow_factory() as uow:
             event = await uow.events.get(event_id, for_update=True)
             if event is None:
                 raise NotFound("Событие не найдено")
-            self._require_for(actor, event.squad_id, event.type)
+            if actor is not None:
+                self._require_for(actor, event.squad_id, event.type)
             is_tournament = event.type == EventType.TOURNAMENT
             if not is_tournament and (
                 event.starts_at is None or event.starts_at <= now or new_starts_at <= now
@@ -346,6 +359,8 @@ class EventService:
                 raise Conflict(ru.EVENT_MOVE_PAST)
             old = event.starts_at
             event.starts_at = new_starts_at
+            if place is not None:
+                event.place = place
             poll = await self._active_poll(uow, event)
             if poll is not None:
                 await uow.polls.supersede(poll, now)
@@ -354,7 +369,7 @@ class EventService:
             [dto] = await to_dtos(uow, [event])
             destination = await resolve_destination(uow, event.squad_id, event_topic(event.type))
             await uow.system.audit(
-                actor_user_id=actor.user.id,
+                actor_user_id=actor.user.id if actor is not None else None,
                 action="event.move",
                 entity="event",
                 entity_id=event.id,
@@ -376,6 +391,7 @@ class EventService:
             title=html.escape(dto.title),
             old=format_when(old_dto, tz),
             new=format_when(dto, tz),
+            place=f"\n📍 {html.escape(dto.place)}" if dto.place else "",
             tournament=_tournament_line(dto),
         )
         posted = (
@@ -412,26 +428,76 @@ class EventService:
         title: str,
         starts_at: datetime,
         place: str | None,
+        *,
+        description: str | None = None,
+        tournament_id: int | None = None,
     ) -> EventDTO:
-        """Матчи ABL автоматически попадают в журнал (используется модулем матчей, этап 2)."""
+        """Матч из источника (mtgame) — в журнал, с постом и опросом участия в топике match.
+        Пересечения не проверяются: время назначает лига."""
         async with self._uow_factory() as uow:
-            event = await uow.events.get_by_match(match_id)
-            if event is None:
-                event = await uow.events.add(
-                    Event(
-                        squad_id=squad_id,
-                        type=EventType.MATCH,
-                        title=title,
-                        starts_at=starts_at,
-                        duration_minutes=MATCH_DURATION_MINUTES,
-                        place=place,
-                        match_id=match_id,
-                    )
+            event = await uow.events.add(
+                Event(
+                    squad_id=squad_id,
+                    type=EventType.MATCH,
+                    title=title[:200],
+                    starts_at=starts_at,
+                    duration_minutes=MATCH_DURATION_MINUTES,
+                    place=place,
+                    description=description,
+                    notify_group=True,
+                    match_id=match_id,
+                    tournament_id=tournament_id,
                 )
-            else:
-                event.title, event.starts_at, event.place = title, starts_at, place
+            )
+            [dto] = await to_dtos(uow, [event])
+            tz = squad_tz(await uow.squads.get(squad_id))
+            destination = await resolve_destination(uow, squad_id, event_topic(EventType.MATCH))
+            await uow.system.audit(
+                actor_user_id=None,
+                action="event.create",
+                entity="event",
+                entity_id=event.id,
+                payload={"match_id": match_id, "published": True},
+            )
             await uow.commit()
-            return EventDTO.model_validate(event)
+        return await self._publish(dto, tz, destination)
+
+    async def update_from_match(
+        self, event_id: int, starts_at: datetime, place: str | None, *, now: datetime | None = None
+    ) -> EventDTO | None:
+        """Матч изменился в источнике. Другое время — перенос, как /event_move (сообщение
+        и новый опрос); только другое место — сообщение в топике. Прошедшее событие и
+        событие без изменений не трогаются (None)."""
+        now = now or utcnow()
+        async with self._uow_factory() as uow:
+            event = await uow.events.get(event_id)
+            if event is None or event.starts_at is None or event.starts_at <= now:
+                return None
+            moved = event.starts_at != starts_at
+            if not moved and (place is None or event.place == place):
+                return None
+        if moved:
+            return await self._move(event_id, starts_at, actor=None, now=now, place=place)
+        async with self._uow_factory() as uow:
+            event = await uow.events.get(event_id)
+            if event is None:
+                return None
+            event.place = place
+            [dto] = await to_dtos(uow, [event])
+            tz = squad_tz(await uow.squads.get(event.squad_id))
+            destination = await resolve_destination(uow, event.squad_id, event_topic(dto.type))
+            await uow.commit()
+        if dto.notify_group and destination is not None and place is not None:
+            text = ru.EVENT_PLACE_CHANGED.format(
+                type=EVENT_TYPE_TITLES[dto.type],
+                title=html.escape(dto.title),
+                when=format_when(dto, tz),
+                place=html.escape(place),
+            )
+            await self._notifier.send_message(
+                destination.chat_id, text, thread_id=destination.thread_id
+            )
+        return dto
 
     async def delete(
         self, actor: UserContext, event_id: int, *, now: datetime | None = None
