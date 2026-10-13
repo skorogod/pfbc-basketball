@@ -10,23 +10,15 @@ def normalize_phone(text: str) -> str:
     """«8 (999) 123-45-67», «+7 999 1234567», «9991234567» → «+79991234567»."""
     raw = text.strip()
     if not re.fullmatch(r"[\d\s()+\-]+", raw):
-        raise ValueError("Телефон — только цифры, например +7 999 123-45-67")
+        raise ValueError("Телефон — только цифры, например +79991234567")
     digits = _DIGITS.sub("", raw)
     if len(digits) == 11 and digits[0] == "8":
         digits = "7" + digits[1:]
     elif len(digits) == 10 and not raw.startswith("+"):
         digits = "7" + digits
     if not 11 <= len(digits) <= 15:
-        raise ValueError("Проверьте номер телефона, например +7 999 123-45-67")
+        raise ValueError("Проверьте номер телефона, например +79991234567")
     return f"+{digits}"
-
-
-def format_phone(phone: str) -> str:
-    """«+79991234567» → «+7 999 123-45-67» (российские номера), иначе как есть."""
-    if len(phone) == 12 and phone.startswith("+7"):
-        d = phone[2:]
-        return f"+7 {d[:3]} {d[3:6]}-{d[6:8]}-{d[8:]}"
-    return phone
 
 
 def normalize_card(text: str) -> str:

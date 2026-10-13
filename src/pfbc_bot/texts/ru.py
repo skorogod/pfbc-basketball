@@ -36,7 +36,7 @@ REG_ASK_MTGAME = (
     'Ссылка на ваш профиль на <a href="https://mtgame.ru/">mtgame.ru</a>. Можно пропустить.'
 )
 REG_ASK_PHONE = (
-    "Телефон, например <code>+7 999 123-45-67</code> — чтобы тренер мог с вами связаться. "
+    "Телефон, например <code>+79991234567</code> — чтобы тренер мог с вами связаться. "
     "Можно пропустить."
 )
 REG_ASK_CONSENT = (
@@ -666,7 +666,7 @@ DETAILS_ASK_METHOD = (
 )
 DETAILS_BTN_PHONE = "📱 По номеру телефона"
 DETAILS_BTN_CARD = "💳 По номеру карты"
-DETAILS_ASK_PHONE = "Номер телефона для перевода, например <code>+7 999 123-45-67</code>:"
+DETAILS_ASK_PHONE = "Номер телефона для перевода, например <code>+79991234567</code>:"
 DETAILS_BTN_MY_PHONE = "Телефон из профиля: {phone}"
 DETAILS_ASK_CARD = "Номер карты, например <code>2202 2000 1234 5678</code>:"
 DETAILS_ASK_BANK = "Банк, например <code>Сбербанк</code> или <code>Т-Банк</code>:"

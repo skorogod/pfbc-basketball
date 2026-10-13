@@ -4,7 +4,6 @@ import pytest
 
 from pfbc_bot.domain.payments import (
     format_amount,
-    format_phone,
     normalize_card,
     normalize_phone,
     parse_amount,
@@ -17,7 +16,6 @@ from pfbc_bot.schemas.payments import PaymentDetails, PaymentMethod
 )
 def test_normalize_phone(raw: str) -> None:
     assert normalize_phone(raw) == "+79991234567"
-    assert format_phone(normalize_phone(raw)) == "+7 999 123-45-67"
 
 
 @pytest.mark.parametrize("raw", ["12345", "телефон", "+7 999"])
