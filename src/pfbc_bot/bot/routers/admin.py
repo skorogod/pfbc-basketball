@@ -273,7 +273,10 @@ async def on_role_action(
             return
         await callback.answer()
         if message is not None:
-            await message.answer(_role_card(view, squad), reply_markup=_role_keyboard(view, squad))
+            await message.answer(
+                _role_card(view, squad, services.admins.is_admin_user(view.user)),
+                reply_markup=_role_keyboard(view, squad),
+            )
         return
 
     role_value, _, grant = callback_data.action.partition("-")
@@ -282,17 +285,21 @@ async def on_role_action(
     )
     await callback.answer(ru.PROFILE_UPDATED)
     if message is not None:
-        await message.edit_text(_role_card(view, squad), reply_markup=_role_keyboard(view, squad))
+        await message.edit_text(
+            _role_card(view, squad, services.admins.is_admin_user(view.user)),
+            reply_markup=_role_keyboard(view, squad),
+        )
 
 
-def _role_card(view: SquadMemberView, squad: SquadDTO) -> str:
-    """Карточка участника для админа: роли и все данные профиля."""
+def _role_card(view: SquadMemberView, squad: SquadDTO, is_admin: bool) -> str:
+    """Карточка участника для админа: роли (и админ бота) и все данные профиля."""
     user = view.user
+    roles = _roles_text(view.roles) or ROLE_TITLES[SquadRole.PLAYER]
     lines = [
         ru.ROLE_CARD.format(
             name=user.profile_html,
             squad=html.escape(squad.name),
-            roles=_roles_text(view.roles) or ROLE_TITLES[SquadRole.PLAYER],
+            roles=roles + (ru.CARD_BOT_ADMIN if is_admin else ""),
         ),
         ru.CARD_TELEGRAM.format(
             username=f"@{html.escape(user.username)}" if user.username else ru.CARD_NO_USERNAME,
@@ -322,7 +329,7 @@ def _joined_line(view: SquadMemberView, tz: str) -> str:
     в БД для дежурств у такого стоит заведомо старая дата — её не показываем."""
     membership = view.membership
     if membership.first_joined_at == DISCOVERED_FIRST_JOINED_AT:
-        return ru.CARD_JOINED_UNKNOWN.format(seen=f"{to_local(membership.joined_at, tz):%d.%m.%Y}")
+        return ru.CARD_JOINED_UNKNOWN
     return ru.CARD_FIELD.format(
         title="В составе с", value=f"{to_local(membership.first_joined_at, tz):%d.%m.%Y}"
     )

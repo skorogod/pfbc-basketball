@@ -1088,6 +1088,7 @@ async def test_admin_sees_member_details(
     )
     card = harness.session.texts_to(ADMIN_TG_ID)[-1]
     assert "Телефон: +79997654321" in card and "Регистрация: ⚠️ не пройдена" in card
+    assert "Роли: игрок\n" in card and ru.CARD_BOT_ADMIN not in card
     assert ru.CARD_NO_LINK in card  # без username и не писал боту — объясняем, почему без ссылки
     today = f"{datetime.now(UTC).astimezone(ZoneInfo(MSK)):%d.%m.%Y}"
     assert f"В составе с: {today}" in card  # вступил при боте — настоящая дата
@@ -1122,8 +1123,11 @@ async def test_admin_sees_member_details(
     assert "Реквизиты:\n• " in card and "4111 1111 1111 1111" in card and "Т-Банк" in card
     await harness.press(ADMIN_TG_ID, open_old)
     card = harness.session.texts_to(ADMIN_TG_ID)[-1]
-    assert (
-        f"до подключения бота (дату вступления Telegram не сообщает), бот видит его с {today}"
-        in (card)
+    assert ru.CARD_JOINED_UNKNOWN in card
+    # админ бота — отмечен в ролях
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    await harness.press(
+        ADMIN_TG_ID, RoleAction(squad_id=squad.id, user_id=admin.user.id, action="open").pack()
     )
+    assert f"Роли: игрок{ru.CARD_BOT_ADMIN}" in harness.session.texts_to(ADMIN_TG_ID)[-1]
     assert "01.01.2000" not in card
