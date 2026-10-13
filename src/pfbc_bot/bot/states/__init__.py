@@ -64,10 +64,12 @@ class ReviewTime(StatesGroup):
 
 
 class GamePaymentCreation(StatesGroup):
+    roster = State()  # заявка: кто играет и платит
     amount = State()
     deadline = State()
     collector = State()
     details = State()
+    save_details = State()  # новые реквизиты — сохранить в профиле?
     confirm = State()
 
 

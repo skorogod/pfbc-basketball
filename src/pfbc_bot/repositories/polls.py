@@ -17,6 +17,9 @@ class PollsRepository:
         await self._session.flush()
         return poll
 
+    async def get_by_id(self, poll_id: int) -> Poll | None:
+        return await self._session.get(Poll, poll_id)
+
     async def get_by_tg_id(self, tg_poll_id: str) -> Poll | None:
         return (
             await self._session.scalars(select(Poll).where(Poll.tg_poll_id == tg_poll_id))
@@ -77,3 +80,10 @@ class PollsRepository:
         return {
             a.user_id: list(a.option_ids) for a in await self._session.scalars(stmt) if a.option_ids
         }
+
+    async def answers_by_time(self, poll_id: int) -> list[tuple[int, list[int]]]:
+        """(user_id, варианты) в порядке времени ответа (последнего изменения); отозванные
+        голоса не включаются."""
+        stmt = select(PollAnswer).where(PollAnswer.poll_id == poll_id)
+        rows = await self._session.scalars(stmt.order_by(PollAnswer.answered_at, PollAnswer.id))
+        return [(a.user_id, list(a.option_ids)) for a in rows if a.option_ids]

@@ -54,22 +54,31 @@ async def match_id(services: Services) -> int:
     return match.id
 
 
-def payment(match_id: int, deadline: datetime | None, collector_id: int) -> GamePaymentCreate:
+@pytest.fixture
+async def roster(services: Services, match_id: int) -> list[int]:
+    """Заявка — игроки 1 и 2 (они же ответили «Буду (игрок)»)."""
+    return [(await ctx_of(services, tg_id)).user.id for tg_id in (1, 2)]
+
+
+def payment(
+    match_id: int, deadline: datetime | None, collector_id: int, roster: list[int]
+) -> GamePaymentCreate:
     return GamePaymentCreate(
         match_event_id=match_id,
         collector_user_id=collector_id,
         amount=Decimal("2500"),
         deadline_at=deadline,
         details=DETAILS,
+        player_ids=roster,
     )
 
 
 async def test_payment_post_poll_and_reminders(
-    services: Services, notifier: FakeNotifier, match_id: int
+    services: Services, notifier: FakeNotifier, match_id: int, roster: list[int]
 ) -> None:
     coach = await ctx_of(services, COACH)
     await services.game_payments.create(
-        coach, payment(match_id, NOW + timedelta(days=1), coach.user.id), now=NOW
+        coach, payment(match_id, NOW + timedelta(days=1), coach.user.id, roster), now=NOW
     )
 
     post = notifier.to(CHAT_ID)[-1]
@@ -78,9 +87,8 @@ async def test_payment_post_poll_and_reminders(
     assert "Сумма: 2 500 ₽" in post.text and "+79991234567" in post.text
     assert "Оплатить до" in post.text
     assert notifier.polls[-1] == (CHAT_ID, "💰 Оплата игры «PFBC — Динамо»: 2 500 ₽", MATCH_THREAD)
-    assert [d.same_as(DETAILS) for d in await services.game_payments.details_of(coach.user.id)] == [
-        True
-    ]
+    # реквизиты из сбора сами не запоминаются — тренер сохраняет их по вопросу после ввода
+    assert await services.game_payments.details_of(coach.user.id) == []
     assert notifier.stopped_polls == [(CHAT_ID, 1001)]  # голосование участия закрыто
     # закрытый опрос участия планировщик не трогает повторно
     assert await services.polls.close_due(now=at(12)) == 0
@@ -108,7 +116,7 @@ async def test_payment_post_poll_and_reminders(
 
 
 async def test_repeated_reminders_skip_quiet_hours(
-    services: Services, notifier: FakeNotifier, match_id: int
+    services: Services, notifier: FakeNotifier, match_id: int, roster: list[int]
 ) -> None:
     """3 напоминания раз в 6 часов: срок 12.10 20:00 → 20:00, 02:00 → 08:00 (тихие часы),
     08:00; оплативший после первого больше не получает."""
@@ -119,7 +127,9 @@ async def test_repeated_reminders_skip_quiet_hours(
         admin, squad_id, "game_payment_reminder_interval_hours", "6"
     )
     coach = await ctx_of(services, COACH)
-    await services.game_payments.create(coach, payment(match_id, at(20), coach.user.id), now=NOW)
+    await services.game_payments.create(
+        coach, payment(match_id, at(20), coach.user.id, roster), now=NOW
+    )
 
     assert await services.game_payments.remind_due(now=at(20)) == 1
     assert len(notifier.to(1)) == len(notifier.to(2)) == 1
@@ -135,22 +145,24 @@ async def test_repeated_reminders_skip_quiet_hours(
 
 
 async def test_no_reminders_when_count_is_zero(
-    services: Services, notifier: FakeNotifier, match_id: int
+    services: Services, notifier: FakeNotifier, match_id: int, roster: list[int]
 ) -> None:
     admin = await ctx_of(services, ADMIN_TG_ID)
     squad_id = (await services.events.get(match_id)).squad_id
     await services.settings.set_squad_value(admin, squad_id, "game_payment_reminder_count", "0")
     coach = await ctx_of(services, COACH)
-    await services.game_payments.create(coach, payment(match_id, at(20), coach.user.id), now=NOW)
+    await services.game_payments.create(
+        coach, payment(match_id, at(20), coach.user.id, roster), now=NOW
+    )
     assert await services.game_payments.remind_due(now=at(20)) == 0
 
 
 async def test_reminder_in_group_when_dm_closed(
-    services: Services, notifier: FakeNotifier, match_id: int
+    services: Services, notifier: FakeNotifier, match_id: int, roster: list[int]
 ) -> None:
     coach = await ctx_of(services, COACH)
     await services.game_payments.create(
-        coach, payment(match_id, NOW + timedelta(hours=2), coach.user.id), now=NOW
+        coach, payment(match_id, NOW + timedelta(hours=2), coach.user.id, roster), now=NOW
     )
     notifier.blocked_dm = {2}
     assert await services.game_payments.remind_due(now=NOW + timedelta(hours=3)) == 1
@@ -162,13 +174,15 @@ async def test_reminder_in_group_when_dm_closed(
 
 
 async def test_new_payment_replaces_previous_and_rules(
-    services: Services, notifier: FakeNotifier, match_id: int
+    services: Services, notifier: FakeNotifier, match_id: int, roster: list[int]
 ) -> None:
     coach = await ctx_of(services, COACH)
     await services.game_payments.create(
-        coach, payment(match_id, NOW + timedelta(hours=2), coach.user.id), now=NOW
+        coach, payment(match_id, NOW + timedelta(hours=2), coach.user.id, roster), now=NOW
     )
-    await services.game_payments.create(coach, payment(match_id, None, coach.user.id), now=NOW)
+    await services.game_payments.create(
+        coach, payment(match_id, None, coach.user.id, roster), now=NOW
+    )
     # первый сбор закрыл опрос участия, второй — прежний опрос «Оплатил»
     assert notifier.stopped_polls == [(CHAT_ID, 1001), (CHAT_ID, 1002)]
     # у действующего сбора срока нет — напоминаний нет, у прежнего — отменены
@@ -176,10 +190,12 @@ async def test_new_payment_replaces_previous_and_rules(
 
     with pytest.raises(PermissionDenied):  # собирает деньги тренер
         await services.game_payments.create(
-            await ctx_of(services, CAPTAIN), payment(match_id, None, coach.user.id), now=NOW
+            await ctx_of(services, CAPTAIN), payment(match_id, None, coach.user.id, roster), now=NOW
         )
     with pytest.raises(Conflict):
-        await services.game_payments.create(coach, payment(match_id, NOW, coach.user.id), now=NOW)
+        await services.game_payments.create(
+            coach, payment(match_id, NOW, coach.user.id, roster), now=NOW
+        )
 
 
 async def test_payment_status_in_summary_absent_without_payment(
@@ -191,7 +207,7 @@ async def test_payment_status_in_summary_absent_without_payment(
 
 
 async def test_admin_collects_for_coach(
-    services: Services, notifier: FakeNotifier, match_id: int
+    services: Services, notifier: FakeNotifier, match_id: int, roster: list[int]
 ) -> None:
     """Сбор создаёт админ, деньги получает тренер. Получателем можно выбрать только тренера
     или админа, который сам сохранил реквизиты; чужие реквизиты задать или подменить нельзя."""
@@ -204,7 +220,9 @@ async def test_admin_collects_for_coach(
         admin.user.id
     ]
     with pytest.raises(Conflict):
-        await services.game_payments.create(admin, payment(match_id, None, coach.user.id), now=NOW)
+        await services.game_payments.create(
+            admin, payment(match_id, None, coach.user.id, roster), now=NOW
+        )
 
     await services.game_payments.add_details(coach, DETAILS)  # тренер — сам, в /profile
     collectors = [u.id for u in await services.game_payments.collectors(admin, squad_id)]
@@ -215,13 +233,13 @@ async def test_admin_collects_for_coach(
     with pytest.raises(Conflict):
         await services.game_payments.create(
             admin,
-            payment(match_id, NOW + timedelta(hours=2), coach.user.id).model_copy(
+            payment(match_id, NOW + timedelta(hours=2), coach.user.id, roster).model_copy(
                 update={"details": forged}
             ),
             now=NOW,
         )
     await services.game_payments.create(
-        admin, payment(match_id, NOW + timedelta(hours=2), coach.user.id), now=NOW
+        admin, payment(match_id, NOW + timedelta(hours=2), coach.user.id, roster), now=NOW
     )
     post = notifier.to(CHAT_ID)[-1].text
     assert '👤 Получатель: <a href="tg://user?id=100">user100</a>' in post
@@ -258,12 +276,12 @@ async def test_default_deadline_is_configurable(services: Services, match_id: in
 
 
 async def test_closed_payment_poll_stops_reminders(
-    services: Services, notifier: FakeNotifier, match_id: int
+    services: Services, notifier: FakeNotifier, match_id: int, roster: list[int]
 ) -> None:
     """Сбор завершён кнопкой (бот закрывает опрос) или опрос закрыт в Telegram — не напоминаем."""
     coach = await ctx_of(services, COACH)
     created = await services.game_payments.create(
-        coach, payment(match_id, NOW + timedelta(hours=2), coach.user.id), now=NOW
+        coach, payment(match_id, NOW + timedelta(hours=2), coach.user.id, roster), now=NOW
     )
     with pytest.raises(PermissionDenied):
         await services.game_payments.close(await ctx_of(services, CAPTAIN), created.id, now=NOW)
@@ -275,7 +293,9 @@ async def test_closed_payment_poll_stops_reminders(
     assert await services.game_payments.remind_due(now=NOW + timedelta(hours=3)) == 0
 
     # новый сбор; его опрос закрыли в Telegram — бот узнаёт из обновления опроса
-    await services.game_payments.create(coach, payment(match_id, at(20), coach.user.id), now=NOW)
+    await services.game_payments.create(
+        coach, payment(match_id, at(20), coach.user.id, roster), now=NOW
+    )
     assert await services.polls.mark_closed("poll-3", now=NOW) is True
     assert await services.polls.mark_closed("poll-3", now=NOW) is False
     assert await services.game_payments.remind_due(now=at(20)) == 0
@@ -308,7 +328,7 @@ async def test_several_details_managed_by_owner(services: Services, match_id: in
 
 
 async def test_admin_picks_one_of_coach_details(
-    services: Services, notifier: FakeNotifier, match_id: int
+    services: Services, notifier: FakeNotifier, match_id: int, roster: list[int]
 ) -> None:
     admin = await ctx_of(services, ADMIN_TG_ID)
     coach = await ctx_of(services, COACH)
@@ -316,19 +336,23 @@ async def test_admin_picks_one_of_coach_details(
     await services.game_payments.add_details(coach, DETAILS)
     await services.game_payments.add_details(coach, card)
     await services.game_payments.create(
-        admin, payment(match_id, None, coach.user.id).model_copy(update={"details": card}), now=NOW
+        admin,
+        payment(match_id, None, coach.user.id, roster).model_copy(update={"details": card}),
+        now=NOW,
     )
     post = notifier.to(CHAT_ID)[-1].text
     assert "4111 1111 1111 1111" in post and "+79991234567" not in post
 
 
 async def test_all_players_paid_notifies_once(
-    services: Services, notifier: FakeNotifier, match_id: int
+    services: Services, notifier: FakeNotifier, match_id: int, roster: list[int]
 ) -> None:
     """«Все» — ответившие «Буду (игрок)»: оба отметили «Оплатил» — тренеру-получателю
     сообщение, один раз; болельщик не в счёт."""
     coach = await ctx_of(services, COACH)
-    await services.game_payments.create(coach, payment(match_id, None, coach.user.id), now=NOW)
+    await services.game_payments.create(
+        coach, payment(match_id, None, coach.user.id, roster), now=NOW
+    )
     pay_poll = f"poll-{len(notifier.polls)}"
     await services.polls.record_answer(pay_poll, 3, [PAID], now=NOW)  # болельщик
     await services.polls.record_answer(pay_poll, 1, [PAID], now=NOW)

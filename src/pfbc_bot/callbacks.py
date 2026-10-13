@@ -29,6 +29,12 @@ REVIEW_OK = "ok"  # review:ok:<match_event_id>:<unix-время> — назна�
 REVIEW_TIME = "time"  # review:time:<match_event_id> — ввести другое время
 REVIEW_NO = "no"  # review:no:<match_event_id> — разбор не нужен
 
+# «Отметились N игроков» — тренеру/админу (личка): начать сбор денег за игру.
+ROSTER = "roster"
+ROSTER_START = "start"  # roster:start:<match_event_id> — спросить «голосование закроется?»
+ROSTER_START_OK = "startok"  # roster:startok:<match_event_id> — подтверждено: выбор заявки
+ROSTER_NO = "no"  # roster:no — «Отмена» в вопросе подтверждения
+
 
 @dataclass(frozen=True, slots=True)
 class ParsedCallback:

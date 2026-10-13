@@ -86,6 +86,16 @@ class GamePaymentCreate(BaseModel):
     amount: Decimal = Field(gt=0, lt=1_000_000)
     deadline_at: datetime | None = None
     details: PaymentDetails
+    # заявка на игру — кто платит (источник истины для напоминаний и «все оплатили»)
+    player_ids: list[int] = Field(min_length=1, max_length=30)
+    # действующий сбор по игре заменяется (/game_pay); False — отказ («Начать сбор»: второй
+    # тренер не перебивает уже объявленный сбор)
+    replace_active: bool = True
+
+    @field_validator("player_ids")
+    @classmethod
+    def _unique_players(cls, value: list[int]) -> list[int]:
+        return list(dict.fromkeys(value))
 
 
 class GamePaymentDTO(DTO):

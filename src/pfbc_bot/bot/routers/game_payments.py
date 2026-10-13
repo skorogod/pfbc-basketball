@@ -1,8 +1,11 @@
-"""Сбор денег за игру (/game_pay) и реквизиты тренера для перевода.
+"""Сбор денег за игру (/game_pay, кнопка «Начать сбор») и реквизиты тренера для перевода.
 
-Шаги сбора: состав → игра → сумма → срок (сутки / без срока / своя дата) → получатель денег →
-его реквизиты (показываются для проверки; или новые) → предпросмотр → пост и опрос «Оплатил»
-в топике match.
+Шаги сбора: состав → игра → заявка (кто играет и платит, до game_roster_max) → сумма
+(стоимость игры ÷ заявка) → срок (сутки / без срока / своя дата) → получатель денег → его
+реквизиты (подтвердить; или задать — и сохранить в профиле?) → предпросмотр → «Состав на
+матч», пост и опрос «Оплатил» в топике match.
+«Начать сбор» (личка, когда «Буду (игрок)» набралось) — подтверждение «голосование закроется»
+→ заявка → … ; получатель — сам нажавший.
 Реквизиты вводятся так же из /profile (тренер): способ → телефон или карта → банк.
 """
 
@@ -15,9 +18,10 @@ from aiogram.enums import ChatType
 from aiogram.filters import Command
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from pfbc_bot import callbacks
 from pfbc_bot.bot.helpers import ask_squad, callback_message, dismiss, picked_squad
 from pfbc_bot.bot.keyboards.common import (
     Choice,
@@ -39,7 +43,9 @@ from pfbc_bot.schemas.payments import (
 from pfbc_bot.schemas.squads import SquadDTO, UserContext
 from pfbc_bot.schemas.users import UserDTO
 from pfbc_bot.services.container import Services
+from pfbc_bot.services.errors import Conflict
 from pfbc_bot.services.events import format_short
+from pfbc_bot.services.game_payments import format_match_when
 from pfbc_bot.texts import ru
 
 router = Router(name="game_payments")
@@ -49,6 +55,7 @@ FLOW = "gp"
 COLLECTOR_FLOW = "gp_collector"
 AMOUNT_FLOW = "gp_amount"
 DEADLINE_FLOW, DETAILS_FLOW, PUBLISH_FLOW = "gp_deadline", "gp_details", "gp_pub"
+SAVE_DETAILS_FLOW = "gp_save"
 METHOD_FLOW, MY_PHONE_FLOW = "pd_method", "pd_phone"
 PURPOSE_GAME, PURPOSE_PROFILE = "game", "profile"
 
@@ -126,12 +133,189 @@ async def on_match(
     squad = await services.squads.get(event.squad_id)
     await state.clear()
     await state.update_data(event_id=event.id, squad_id=squad.id, tz=squad.timezone)
+    await _ask_roster(message, ctx, services, state)
+
+
+# --- «Начать сбор» из уведомления «Буду (игрок)» отметили N» ---
+@router.callback_query(F.data.startswith(f"{callbacks.ROSTER}:"))
+async def on_roster_start(
+    callback: CallbackQuery, ctx: UserContext, services: Services, state: FSMContext
+) -> None:
+    parsed = callbacks.parse(callback.data or "")
+    message = callback_message(callback)
+    if parsed.action == callbacks.ROSTER_NO:
+        await callback.answer()
+        if message:
+            await dismiss(message)
+        return
+    event_id = parsed.args[0]
+    if parsed.action == callbacks.ROSTER_START:  # шаг 1: «голосование закроется — точно?»
+        choice = await services.game_payments.roster(ctx, event_id)
+        if choice.has_payment:
+            await callback.answer(ru.GAME_PAYMENT_ALREADY, show_alert=True)
+            return
+        await callback.answer()
+        if message is None:
+            return
+        builder = InlineKeyboardBuilder()
+        builder.button(
+            text=ru.ROSTER_BTN_CONFIRM,
+            callback_data=callbacks.pack(callbacks.ROSTER, callbacks.ROSTER_START_OK, event_id),
+        )
+        builder.button(
+            text=ru.BTN_CANCEL, callback_data=f"{callbacks.ROSTER}:{callbacks.ROSTER_NO}"
+        )
+        builder.adjust(2)
+        await message.answer(
+            ru.ROSTER_CONFIRM_START.format(
+                title=html.escape(choice.event.title),
+                when=format_match_when(choice.event, choice.tz),
+                count=sum(c.voted for c in choice.candidates),
+                max=choice.max_players,
+            ),
+            reply_markup=builder.as_markup(),
+        )
+        return
+    if parsed.action == callbacks.ROSTER_START_OK:  # шаг 2: голосование закрыто → заявка
+        await services.game_payments.start_collection(ctx, event_id)
+        await callback.answer()
+        if message is None:
+            return
+        await message.edit_reply_markup(reply_markup=None)
+        event = await services.events.get(event_id)
+        squad = await services.squads.get(event.squad_id)
+        await state.clear()
+        await state.update_data(
+            event_id=event.id,
+            squad_id=squad.id,
+            tz=squad.timezone,
+            collector_id=ctx.user.id,  # деньги получает нажавший
+            from_start=True,  # уже объявленный сбор не заменяется
+        )
+        await _ask_roster(message, ctx, services, state)
+
+
+# --- заявка: кто играет и платит ---
+class RosterPick(CallbackData, prefix="rp"):
+    action: str  # t — включить/убрать игрока | more | less | done
+    user_id: int = 0
+
+
+async def _ask_roster(
+    message: Message, ctx: UserContext, services: Services, state: FSMContext
+) -> None:
+    event_id = int((await state.get_data())["event_id"])
+    choice = await services.game_payments.roster(ctx, event_id)
+    await state.set_state(GamePaymentCreation.roster)
+    await state.update_data(
+        roster=choice.preselected,
+        voted=[c.user.id for c in choice.candidates if c.voted],
+        others=[c.user.id for c in choice.candidates if not c.voted],
+        names={str(c.user.id): c.user.display_name for c in choice.candidates},
+        roster_max=choice.max_players,
+        title=choice.event.title,
+        show_all=not any(c.voted for c in choice.candidates),
+    )
+    data = await state.get_data()
+    await message.answer(_roster_text(data), reply_markup=_roster_markup(data))
+
+
+def _roster_text(data: dict[str, object]) -> str:
+    roster = list(data["roster"])  # type: ignore[call-overload]
+    return ru.ROSTER_CHOOSE.format(
+        title=html.escape(str(data["title"])), count=len(roster), max=data["roster_max"]
+    )
+
+
+def _roster_markup(data: dict[str, object]) -> InlineKeyboardMarkup:
+    roster = set(data["roster"])  # type: ignore[call-overload]
+    names: dict[str, str] = data["names"]  # type: ignore[assignment]
+    voted: list[int] = data["voted"]  # type: ignore[assignment]
+    others: list[int] = data["others"]  # type: ignore[assignment]
+    show_all = bool(data.get("show_all"))
+    builder = InlineKeyboardBuilder()
+    shown = [*voted, *others] if show_all else voted
+    for uid in shown:
+        mark = "✅" if uid in roster else "▫️"
+        hint = "" if uid in voted else " ·"  # не отвечал «Буду (игрок)»
+        builder.button(
+            text=f"{mark} {names[str(uid)]}{hint}"[:60],
+            callback_data=RosterPick(action="t", user_id=uid),
+        )
+    if others:
+        builder.button(
+            text=ru.ROSTER_BTN_LESS if show_all and voted else ru.ROSTER_BTN_MORE,
+            callback_data=RosterPick(action="less" if show_all else "more"),
+        )
+    builder.button(
+        text=ru.ROSTER_BTN_DONE.format(count=len(roster)), callback_data=RosterPick(action="done")
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+@router.callback_query(GamePaymentCreation.roster, RosterPick.filter())
+async def on_roster_pick(
+    callback: CallbackQuery,
+    callback_data: RosterPick,
+    ctx: UserContext,
+    services: Services,
+    state: FSMContext,
+) -> None:
+    message = callback_message(callback)
+    data = await state.get_data()
+    roster: list[int] = list(data["roster"])
+    if callback_data.action == "done":
+        if not roster:
+            await callback.answer(ru.ROSTER_EMPTY, show_alert=True)
+            return
+        await callback.answer()
+        if message is not None:
+            await message.edit_reply_markup(reply_markup=None)
+            await _ask_amount(message, ctx, services, state)
+        return
+    if callback_data.action == "t":
+        uid = callback_data.user_id
+        if uid not in (*data["voted"], *data["others"]):
+            await callback.answer()
+            return
+        if uid in roster:
+            roster.remove(uid)
+        elif len(roster) >= int(data["roster_max"]):
+            await callback.answer(ru.ROSTER_LIMIT.format(max=data["roster_max"]), show_alert=True)
+            return
+        else:
+            roster.append(uid)
+        await state.update_data(roster=roster)
+    elif callback_data.action in ("more", "less"):
+        await state.update_data(show_all=callback_data.action == "more")
+    await callback.answer()
+    if message is not None:
+        data = await state.get_data()
+        await message.edit_text(_roster_text(data), reply_markup=_roster_markup(data))
+
+
+# --- сумма: стоимость игры ÷ заявка ---
+async def _ask_amount(
+    message: Message, ctx: UserContext, services: Services, state: FSMContext
+) -> None:
+    data = await state.get_data()
+    players = len(data["roster"])
     await state.set_state(GamePaymentCreation.amount)
     # матч турнира со стоимостью игры — сумма с игрока одной кнопкой
-    suggestion = await services.game_payments.suggest_amount(ctx, event.id)
-    markup = None
+    suggestion = await services.game_payments.suggest_amount(ctx, int(data["event_id"]), players)
+    text, markup = ru.GAME_PAYMENT_ASK_AMOUNT, None
     if suggestion is not None:
         await state.update_data(suggested=str(suggestion.per_player))
+        text = (
+            ru.GAME_PAYMENT_AMOUNT_CALC.format(
+                players=players,
+                price=format_amount(suggestion.game_price),
+                amount=format_amount(suggestion.per_player),
+            )
+            + "\n\n"
+            + text
+        )
         markup = choices_keyboard(
             AMOUNT_FLOW,
             [
@@ -145,7 +329,7 @@ async def on_match(
                 )
             ],
         )
-    await message.answer(ru.GAME_PAYMENT_ASK_AMOUNT, reply_markup=markup)
+    await message.answer(text, reply_markup=markup)
 
 
 @router.message(GamePaymentCreation.amount, F.text)
@@ -236,8 +420,14 @@ async def on_deadline_choice(
 async def _ask_collector(
     message: Message, ctx: UserContext, services: Services, state: FSMContext
 ) -> None:
-    """Кто получает деньги: создающий или тренер/админ состава со своими реквизитами."""
-    squad_id = int((await state.get_data())["squad_id"])
+    """Кто получает деньги: создающий или тренер/админ состава со своими реквизитами.
+    Из «Начать сбор» — сам нажавший, без вопроса."""
+    data = await state.get_data()
+    squad_id = int(data["squad_id"])
+    if data.get("from_start"):
+        collector = await services.game_payments.collector(ctx, squad_id, ctx.user.id)
+        await _ask_details(message, ctx, services, state, collector)
+        return
     people = await services.game_payments.collectors(ctx, squad_id)
     await state.set_state(GamePaymentCreation.collector)
     options = [
@@ -291,13 +481,9 @@ async def _ask_details(
     )
     numbered = "\n".join(f"{n}. {d.text}" for n, d in enumerate(saved, 1))
     template = ru.GAME_PAYMENT_COLLECTOR_DETAILS if mine else ru.GAME_PAYMENT_OTHER_DETAILS
+    single = ru.GAME_PAYMENT_BTN_DETAILS_OK if mine else ru.GAME_PAYMENT_BTN_USE
     options = [
-        (
-            d.id,
-            ru.GAME_PAYMENT_BTN_USE_N.format(n=n, details=d.short)
-            if len(saved) > 1
-            else ru.GAME_PAYMENT_BTN_USE,
-        )
+        (d.id, ru.GAME_PAYMENT_BTN_USE_N.format(n=n, details=d.short) if len(saved) > 1 else single)
         for n, d in enumerate(saved, 1)
     ]
     if mine:
@@ -510,6 +696,34 @@ async def on_bank(
         await show_my_details(message, ctx, services)
         return
     await state.update_data(details=details.model_dump(mode="json"))
+    # свои новые реквизиты — сохранить в профиле? (сами по себе не запоминаются)
+    await state.set_state(GamePaymentCreation.save_details)
+    await message.answer(
+        ru.GAME_PAYMENT_ASK_SAVE_DETAILS.format(details=details.text),
+        reply_markup=choices_keyboard(SAVE_DETAILS_FLOW, [("yes", ru.BTN_YES), ("no", ru.BTN_NO)]),
+    )
+
+
+@router.callback_query(GamePaymentCreation.save_details, Choice.filter(F.flow == SAVE_DETAILS_FLOW))
+async def on_save_details(
+    callback: CallbackQuery,
+    callback_data: Choice,
+    ctx: UserContext,
+    services: Services,
+    state: FSMContext,
+) -> None:
+    await callback.answer()
+    message = callback_message(callback)
+    if message is None:
+        return
+    await message.edit_reply_markup(reply_markup=None)
+    if callback_data.value == "yes":
+        details = PaymentDetails.model_validate((await state.get_data())["details"])
+        try:
+            await services.game_payments.add_details(ctx, details)
+            await message.answer(ru.GAME_PAYMENT_DETAILS_SAVED)
+        except Conflict as exc:  # лимит реквизитов — сбор продолжается без сохранения
+            await message.answer(str(exc))
     await _preview(message, ctx, services, state)
 
 
@@ -522,16 +736,18 @@ def _payment_data(data: dict[str, object]) -> GamePaymentCreate:
         amount=Decimal(str(data["amount"])),
         deadline_at=datetime.fromisoformat(str(deadline)) if deadline else None,
         details=PaymentDetails.model_validate(data["details"]),
+        player_ids=list(data["roster"]),  # type: ignore[call-overload]
+        replace_active=not data.get("from_start"),
     )
 
 
 async def _preview(
     message: Message, ctx: UserContext, services: Services, state: FSMContext
 ) -> None:
-    post = await services.game_payments.preview(ctx, _payment_data(await state.get_data()))
+    preview = await services.game_payments.preview(ctx, _payment_data(await state.get_data()))
     await state.set_state(GamePaymentCreation.confirm)
     await message.answer(
-        ru.GAME_PAYMENT_PREVIEW.format(post=post),
+        ru.GAME_PAYMENT_PREVIEW.format(roster=preview.roster, post=preview.post),
         reply_markup=choices_keyboard(
             PUBLISH_FLOW, [("yes", ru.GAME_PAYMENT_BTN_PUBLISH), ("no", ru.BTN_CANCEL)]
         ),

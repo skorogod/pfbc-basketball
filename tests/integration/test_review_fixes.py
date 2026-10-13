@@ -63,6 +63,7 @@ def _payment(match_id: int, collector_id: int, deadline: datetime | None) -> Gam
         amount=Decimal("1000"),
         deadline_at=deadline,
         details=DETAILS,
+        player_ids=[collector_id],
     )
 
 
@@ -128,8 +129,9 @@ async def test_game_payment_poll_failure_removes_post(
     notifier.fail_polls_on = {2}
     with pytest.raises(Conflict):
         await services.game_payments.create(coach, _payment(match_id, coach.user.id, None), now=NOW)
-    post_id = notifier.to(CHAT_ID)[-1].message_id
-    assert notifier.deleted == [(CHAT_ID, post_id)]  # пост без опроса удалён
+    roster_id, post_id = (m.message_id for m in notifier.to(CHAT_ID)[-2:])
+    # состав и пост без опроса удалены
+    assert notifier.deleted == [(CHAT_ID, roster_id), (CHAT_ID, post_id)]
     assert await services.game_payments.status(coach, match_id) is None  # сбора нет
 
 

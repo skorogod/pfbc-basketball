@@ -4,7 +4,17 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import ForeignKey, Index, Numeric, SmallInteger, String, UniqueConstraint, text
+from sqlalchemy import (
+    BigInteger,
+    ForeignKey,
+    Index,
+    Numeric,
+    SmallInteger,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pfbc_bot.db.base import Base, CreatedAtMixin, IdMixin, str_enum
@@ -50,8 +60,8 @@ class PaymentReceipt(IdMixin, Base):
 
 
 class GamePayment(IdMixin, CreatedAtMixin, Base):
-    """Сбор денег за игру: сумма, реквизиты, дедлайн и опрос «Оплатил» в группе.
-    После дедлайна бот напоминает ответившим «Буду (игрок)», кто не отметил оплату."""
+    """Сбор денег за игру: заявка (кто платит), сумма, реквизиты, дедлайн и опрос «Оплатил»
+    в группе. После дедлайна бот напоминает игрокам заявки, кто не отметил оплату."""
 
     __tablename__ = "game_payments"
     __table_args__ = (
@@ -78,6 +88,37 @@ class GamePayment(IdMixin, CreatedAtMixin, Base):
     )
     # заменён новым сбором по той же игре или игра удалена — напоминаний нет
     cancelled_at: Mapped[datetime | None]
+    # сообщение «Состав на матч» в группе (опубликовано перед постом сбора)
+    roster_message_id: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class GamePaymentPlayer(IdMixin, Base):
+    """Заявка на игру — кто платит. Источник истины для суммы, напоминаний и «все оплатили»;
+    у сборов без заявки (созданных до неё) игроки — ответившие «Буду (игрок)»."""
+
+    __tablename__ = "game_payment_players"
+    __table_args__ = (UniqueConstraint("payment_id", "user_id"),)
+
+    payment_id: Mapped[int] = mapped_column(
+        ForeignKey("game_payments.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+
+
+class RosterNotice(IdMixin, CreatedAtMixin, Base):
+    """Сообщение тренеру/админу «отметились N игроков» с кнопкой «Начать сбор». Хранится,
+    чтобы снять кнопку, когда число изменилось или сбор начат; players — число в сообщении."""
+
+    __tablename__ = "roster_notices"
+
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
+    poll_id: Mapped[int] = mapped_column(ForeignKey("polls.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int | None] = mapped_column(BigInteger)  # None — не доставлено
+    text: Mapped[str] = mapped_column(Text)
+    players: Mapped[int]
+    hidden_at: Mapped[datetime | None]  # кнопка снята (или сообщение не доставлено)
 
 
 class ReceiptRequest(IdMixin, CreatedAtMixin, Base):

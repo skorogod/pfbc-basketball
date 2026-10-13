@@ -522,7 +522,7 @@ GAME_PAYMENT_EVENT = "{type}: <b>{title}</b>, {when}{tournament}"
 GAME_PAYMENT_POST = (
     "💰 <b>Сбор за игру</b>\n\n{event}\n\n"
     "<b>Сумма: {amount}</b>\n👤 Получатель: {collector}\n{details}{deadline}\n\n"
-    "Платят все, кто ответил «Буду (игрок)». После перевода отметьте «Оплатил» в опросе ниже."
+    "Платят игроки из состава выше ({players}). После перевода отметьте «Оплатил» в опросе ниже."
 )
 GAME_PAYMENT_DEADLINE = "\n⏰ Оплатить до {when}"
 GAME_PAYMENT_ALL_PAID = (
@@ -531,7 +531,7 @@ GAME_PAYMENT_ALL_PAID = (
 GAME_PAYMENT_POLL_QUESTION = "💰 Оплата игры «{title}»: {amount}"
 GAME_PAYMENT_REMINDER_DM = (
     "💰 Напоминание об оплате игры\n{event}\n\n<b>Сумма: {amount}</b>\n{details}\n\n"
-    "Вы отметили «Буду (игрок)», но ещё не отметили «Оплатил» в опросе в группе. "
+    "Вы в составе на эту игру, но ещё не отметили «Оплатил» в опросе в группе. "
     "После перевода отметьте, пожалуйста."
 )
 GAME_PAYMENT_REMINDER_GROUP = (
@@ -557,7 +557,7 @@ RECEIPT_CONFIRM_CLOSE = (
 )
 RECEIPT_CLOSED = "🏁 Сбор квитанций за {month} завершён: опрос закрыт, напоминаний больше не будет."
 GAME_PAYMENT_NOT_FOUND = "Сбор денег не найден или отменён."
-GAME_PAYMENT_STATUS_OTHERS = "\nОплатили, но не отмечены игроками: {names}"
+GAME_PAYMENT_STATUS_OTHERS = "\nОплатили, но не в составе: {names}"
 GAME_PAYMENT_CHOOSE_MATCH = "За какую игру собираем деньги?"
 GAME_PAYMENT_NO_MATCHES = "Нет матчей для сбора денег. Создайте матч: /event_add"
 GAME_PAYMENT_ASK_AMOUNT = "Сумма с каждого игрока в рублях, например <code>2500</code>:"
@@ -586,9 +586,55 @@ GAME_PAYMENT_OTHER_DETAILS = (
 GAME_PAYMENT_COLLECTOR_NOT_ALLOWED = (
     "Получателем можно выбрать себя или тренера/админа состава, который сам указал реквизиты."
 )
-GAME_PAYMENT_BTN_NEW_DETAILS = "✏️ Ввести новые"
+GAME_PAYMENT_BTN_NEW_DETAILS = "✏️ Задать реквизиты"
+GAME_PAYMENT_BTN_DETAILS_OK = "✅ Реквизиты подтверждаю"
+GAME_PAYMENT_ASK_SAVE_DETAILS = (
+    "Сохранить эти реквизиты в профиле, чтобы в следующий раз не вводить?\n{details}"
+)
+GAME_PAYMENT_DETAILS_SAVED = "💾 Реквизиты сохранены в профиле."
+GAME_PAYMENT_ALREADY = "Сбор денег за эту игру уже объявлен."
+GAME_PAYMENT_AMOUNT_CALC = (
+    "В заявке {players} игр. Стоимость игры {price} ÷ {players} = <b>{amount}</b> с игрока "
+    "(округлено вверх до рубля)."
+)
+
+# --- заявка на игру и «Состав на матч» ---
+ROSTER_POST = (
+    "🏀 <b>Состав на матч</b>\n<b>{title}</b>\n🗓 {when}{place}{tournament}{description}\n\n"
+    "<b>Игроки ({count}):</b>\n{players}"
+)
+ROSTER_NOTICE_FIRST = (
+    "🏀 <b>{title}</b>\n🗓 {when}\n\nСостав набран: «Буду (игрок)» отметили <b>{count}</b>.{hints}"
+)
+ROSTER_NOTICE_UPDATE = (
+    "🏀 <b>{title}</b>\n🗓 {when}\n\n«Буду (игрок)» теперь <b>{count}</b> (было {previous}).{hints}"
+)
+ROSTER_NOTICE_TOO_MANY = "В заявку войдут не больше {max} — выберете при начале сбора."
+ROSTER_NOTICE_SHORT = "До полного состава ({size}) не хватает {missing}."
+ROSTER_NOTICE_NO_PRICE = "Стоимость игры у турнира не указана — сумму с игрока введёте сами."
+ROSTER_BTN_START = "💰 Начать сбор"
+ROSTER_CONFIRM_START = (
+    "<b>{title}</b>, {when}\n«Буду (игрок)» отметили {count}.\n\n"
+    "Голосование об участии будет закрыто — снова открыть его нельзя. Дальше: выбор заявки "
+    "(до {max} игроков), сумма, срок, реквизиты. Если прервётесь — нажмите «Начать сбор» ещё "
+    "раз. Подтвердить?"
+)
+ROSTER_BTN_CONFIRM = "✅ Подтвердить"
+ROSTER_CHOOSE = (
+    "<b>Заявка на игру</b> {title}\nОтмечено: <b>{count}</b> из {max}.\n"
+    "✅ — в заявке. Нажмите на игрока, чтобы включить или убрать. Платят только игроки заявки."
+)
+ROSTER_OTHERS = "Не отвечали «Буду (игрок)»:"
+ROSTER_BTN_MORE = "➕ Добавить из состава"
+ROSTER_BTN_LESS = "➖ Только ответившие «Буду (игрок)»"
+ROSTER_BTN_DONE = "Готово ({count}) →"
+ROSTER_LIMIT = "В заявке уже {max} — сначала уберите кого-нибудь."
+ROSTER_EMPTY = "Отметьте хотя бы одного игрока."
+ROSTER_TOO_MANY = "В заявке больше {max} игроков — уберите лишних и попробуйте снова."
+ROSTER_NOT_MEMBERS = "Кто-то из заявки уже не в группе состава — выберите заявку заново: /game_pay"
 GAME_PAYMENT_PREVIEW = (
-    "Так будет выглядеть пост в группе:\n\n{post}\n\nОпубликовать с опросом «Оплатил»?"
+    "Так будет в группе — состав, пост и опрос «Оплатил»:\n\n{roster}\n\n➖➖➖\n\n{post}\n\n"
+    "Реквизиты и сумма верны? Опубликовать?"
 )
 GAME_PAYMENT_BTN_PUBLISH = "✅ Опубликовать"
 GAME_PAYMENT_CREATED = "✅ Сбор опубликован в группе."

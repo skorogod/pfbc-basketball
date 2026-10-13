@@ -5,10 +5,12 @@ from pfbc_bot.db.models.greetings import Greeting
 from pfbc_bot.db.models.matches import Match
 from pfbc_bot.db.models.payments import (
     GamePayment,
+    GamePaymentPlayer,
     PaymentPeriod,
     PaymentReceipt,
     PaymentReminderConfig,
     ReceiptRequest,
+    RosterNotice,
 )
 from pfbc_bot.db.models.polls import Poll, PollAnswer
 from pfbc_bot.db.models.squads import (
@@ -28,6 +30,7 @@ __all__ = [
     "Event",
     "FsmState",
     "GamePayment",
+    "GamePaymentPlayer",
     "Greeting",
     "Match",
     "PaymentPeriod",
@@ -37,6 +40,7 @@ __all__ = [
     "PollAnswer",
     "ReceiptRequest",
     "ReminderLog",
+    "RosterNotice",
     "SettingsEntry",
     "Squad",
     "SquadChat",

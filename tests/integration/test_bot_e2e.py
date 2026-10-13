@@ -39,7 +39,7 @@ from pfbc_bot.bot.keyboards.common import Choice, ItemAction, SquadPick
 from pfbc_bot.bot.middlewares.access import to_telegram_user
 from pfbc_bot.bot.routers.admin import AdminAction, RoleAction
 from pfbc_bot.bot.routers.events import TournamentLink
-from pfbc_bot.bot.routers.game_payments import DetailsAction
+from pfbc_bot.bot.routers.game_payments import DetailsAction, RosterPick
 from pfbc_bot.bot.routers.permissions import PermAction
 from pfbc_bot.domain.dates import local_to_utc
 from pfbc_bot.domain.enums import SquadRole, TrainingStatus
@@ -683,8 +683,9 @@ async def test_cancel_removes_question_without_reply(
 async def test_game_pay_with_suggested_amount_and_new_details(
     harness: Harness, services: Services, notifier: FakeNotifier
 ) -> None:
-    """/game_pay: игра турнира → сумма «стоимость ÷ игроки» → сутки → свой телефон → банк →
-    предпросмотр → публикация поста и опроса «Оплатил»; реквизиты запоминаются."""
+    """/game_pay: игра турнира → заявка (оба ответивших «Буду (игрок)» отмечены) → сумма
+    «стоимость ÷ заявка» → сутки → свой телефон → банк → «Сохранить?» → предпросмотр →
+    «Состав на матч», пост и опрос «Оплатил»."""
     await bind(harness)
     for tg_id in (COACH, 1, 2):
         await harness.member(tg_id, joined=True)
@@ -721,6 +722,9 @@ async def test_game_pay_with_suggested_amount_and_new_details(
 
     await harness.private(COACH, "/game_pay")
     await harness.press(COACH, ItemAction(kind="gp", action="match", item_id=match.id).pack())
+    assert "Отмечено: <b>2</b> из 12" in harness.session.texts_to(COACH)[-1]
+    await harness.press(COACH, RosterPick(action="done").pack())
+    assert "15 000 ₽ ÷ 2 = <b>7 500 ₽</b>" in harness.session.texts_to(COACH)[-1]
     await harness.press(COACH, Choice(flow="gp_amount", value="suggested").pack())
     await harness.press(COACH, Choice(flow="gp_deadline", value="day").pack())
     assert harness.session.texts_to(COACH)[-1].startswith(ru.GAME_PAYMENT_ASK_COLLECTOR)
@@ -728,14 +732,95 @@ async def test_game_pay_with_suggested_amount_and_new_details(
     await harness.press(COACH, Choice(flow="pd_method", value="phone").pack())
     await harness.press(COACH, Choice(flow="pd_phone", value="mine").pack())
     await harness.private(COACH, "Сбербанк")
+    assert harness.session.texts_to(COACH)[-1].startswith("Сохранить эти реквизиты")
+    await harness.press(COACH, Choice(flow="gp_save", value="yes").pack())
     preview = harness.session.texts_to(COACH)[-1]
     assert "Сумма: 7 500 ₽" in preview and "+79991234567" in preview and "Кубок" in preview
+    assert "Состав на матч" in preview and "Игроки (2)" in preview
     await harness.press(COACH, Choice(flow="gp_pub", value="yes").pack())
 
     assert notifier.polls[-1][1] == "💰 Оплата игры «Финал»: 7 500 ₽"
-    assert "Сумма: 7 500 ₽" in notifier.to(GROUP_ID)[-1].text
+    roster_post, post = (m.text for m in notifier.to(GROUP_ID)[-2:])
+    assert roster_post.startswith("🏀 <b>Состав на матч</b>\n<b>Финал</b>\n🗓 ")
+    assert "\n🏆 Кубок" in roster_post and "📍" not in roster_post  # места нет — строки нет
+    assert '1. <a href="tg://user?id=' in roster_post and "2. " in roster_post
+    assert "Сумма: 7 500 ₽" in post and "Платят игроки из состава выше (2)" in post
     [saved] = await services.game_payments.details_of(coach.user.id)
     assert saved.value == "+79991234567" and saved.bank == "Сбербанк"
+
+
+async def test_start_collection_from_notice(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """«Буду (игрок)» отметили 10 → тренеру «Начать сбор» → подтверждение (голосование
+    закрывается) → заявка: одного убрать, добавить не голосовавшего → сумма → срок → без
+    выбора получателя → реквизиты задать, не сохранять → предпросмотр → публикация."""
+    await bind(harness)
+    players = list(range(1, 11))
+    for tg_id in (COACH, *players, 11):
+        await harness.member(tg_id, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach = await ctx_of(services, COACH)
+    await services.squads.set_role(admin, squad.id, coach.user.id, SquadRole.COACH, grant=True)
+    cup = await services.events.create(
+        admin,
+        EventCreate(
+            squad_id=squad.id,
+            type="tournament",
+            title="ABL",
+            is_season=True,
+            game_price=Decimal("15000"),
+        ),
+    )
+    await services.events.create(
+        admin,
+        EventCreate(
+            squad_id=squad.id,
+            type="match",
+            title="PFBC — Динамо",
+            starts_at=datetime.now(UTC) + timedelta(days=3),
+            tournament_id=cup.id,
+            notify_group=True,
+        ),
+    )
+    for tg_id in players:
+        await services.polls.record_answer("poll-1", tg_id, [1])
+    assert await services.game_payments.send_roster_updates() == 1
+    notice = notifier.to(COACH)[-1]
+    start = notice.buttons()[ru.ROSTER_BTN_START]
+
+    await harness.press(COACH, start)
+    assert "Голосование об участии будет закрыто" in harness.session.texts_to(COACH)[-1]
+    await harness.press(COACH, start.replace(":start:", ":startok:"))
+    assert notifier.stopped_polls[-1] == (GROUP_ID, 1001)
+    assert "Отмечено: <b>10</b> из 12" in harness.session.texts_to(COACH)[-1]
+
+    user10 = (await ctx_of(services, 10)).user.id
+    user11 = (await ctx_of(services, 11)).user.id
+    await harness.press(COACH, RosterPick(action="t", user_id=user10).pack())  # убрать
+    await harness.press(COACH, RosterPick(action="more").pack())
+    await harness.press(COACH, RosterPick(action="t", user_id=user11).pack())  # не голосовал
+    await harness.press(COACH, RosterPick(action="done").pack())
+    assert "15 000 ₽ ÷ 10 = <b>1 500 ₽</b>" in harness.session.texts_to(COACH)[-1]
+    await harness.press(COACH, Choice(flow="gp_amount", value="suggested").pack())
+    await harness.press(COACH, Choice(flow="gp_deadline", value="day").pack())
+    # получатель — сам нажавший: сразу реквизиты (сохранённых нет — ввод)
+    await harness.press(COACH, Choice(flow="pd_method", value="card").pack())
+    await harness.private(COACH, "4111 1111 1111 1111")
+    await harness.private(COACH, "Т-Банк")
+    await harness.press(COACH, Choice(flow="gp_save", value="no").pack())
+    assert "Игроки (10)" in harness.session.texts_to(COACH)[-1]
+    await harness.press(COACH, Choice(flow="gp_pub", value="yes").pack())
+
+    roster_post, post = (m.text for m in notifier.to(GROUP_ID)[-2:])
+    assert "Игроки (10)" in roster_post and "user11" in roster_post and "user10" not in roster_post
+    assert "Сумма: 1 500 ₽" in post and "4111 1111 1111 1111" in post
+    assert await services.game_payments.details_of(coach.user.id) == []  # не сохраняли
+    # кнопка в уведомлении снята; новые голоса уведомлений не дают
+    assert (COACH, notice.message_id, notice.text) in notifier.edits
+    assert await services.game_payments.send_roster_updates() == 0
 
 
 async def test_permissions_admin_toggles_role(
@@ -845,6 +930,7 @@ async def test_payment_block_only_for_coach(
             collector_user_id=coach.user.id,
             amount=Decimal("1000"),
             details=PaymentDetails(method=PaymentMethod.PHONE, value="+79991234567", bank="Сбер"),
+            player_ids=[coach.user.id],
         ),
     )
     for tg_id, has_block in ((COACH, True), (PLAYER, False), (3, False)):

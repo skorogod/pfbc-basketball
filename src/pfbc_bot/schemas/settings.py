@@ -55,6 +55,11 @@ class SquadSettings(BaseModel):
     receipt_poll_day: int = Field(default=1, ge=1, le=28)
     receipt_poll_time: time = time(10, 0)
     receipt_deadline_hours: int = Field(default=24, ge=1, le=720)
+    # «Буду (игрок)» отметили столько — тренерам и админам состава предложение начать сбор,
+    # дальше — сообщение при каждом изменении числа; 0 — не предлагать
+    game_payment_squad_size: int = Field(default=10, ge=0, le=30)
+    # сколько игроков можно включить в заявку на игру
+    game_roster_max: int = Field(default=12, ge=1, le=30)
     # сбор денег за игру: срок по умолчанию (кнопка на шаге «срок» в /game_pay)
     game_payment_deadline_hours: int = Field(default=24, ge=1, le=720)
     # напоминания не оплатившим: первое — в срок, следующие — через интервал; 0 — не напоминать.

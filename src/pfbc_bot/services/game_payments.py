@@ -1,9 +1,16 @@
 """Сбор денег за игру: пост с суммой и реквизитами, опрос «Оплатил», напоминания после дедлайна.
 
 Это не оплата тренировок по квитанциям mos.ru (ФТ-8) — другой процесс и другие таблицы.
-Платят ответившие «Буду (игрок)» в опросе участия в матче: после дедлайна каждому, кто не
-отметил «Оплатил», бот пишет в личку, а не дошедших — упоминает в группе (топик match).
-Сколько раз и с каким интервалом — настройки состава; с 00:00 до 08:00 не напоминает.
+Платят игроки **заявки** — её выбирает тренер (из ответивших «Буду (игрок)» и остальных
+участников, не больше game_roster_max); заявка — источник истины для суммы, напоминаний и
+«все оплатили», ответы в опросе участия на оплату не влияют. Перед постом сбора в топик
+match публикуется «Состав на матч». После дедлайна каждому из заявки, кто не отметил
+«Оплатил», бот пишет в личку, а не дошедших — упоминает в группе. Сколько раз и с каким
+интервалом — настройки состава; с 00:00 до 08:00 не напоминает.
+
+Пока сбор не начат, тренерам и админам состава приходит «Буду (игрок)» отметили N» — когда
+набралось game_payment_squad_size, и потом при каждом изменении числа (кнопка «Начать сбор»
+— только в последнем сообщении).
 """
 
 import html
@@ -11,8 +18,15 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 
-from pfbc_bot.db.models import Event, GamePayment, Poll, User
-from pfbc_bot.domain.dates import due_payment_reminder, format_local, utcnow
+from pfbc_bot import callbacks
+from pfbc_bot.db.models import Event, GamePayment, Poll, RosterNotice, User
+from pfbc_bot.domain.dates import (
+    WEEKDAY_SHORT,
+    due_payment_reminder,
+    format_local,
+    to_local,
+    utcnow,
+)
 from pfbc_bot.domain.enums import (
     EVENT_TYPE_TITLES,
     GAME_PAYMENT_PAID,
@@ -36,7 +50,11 @@ from pfbc_bot.schemas.payments import (
     PaymentDetails,
     parse_details_list,
 )
-from pfbc_bot.schemas.settings import MAX_PAYMENT_REMINDER_INTERVAL_HOURS, MAX_PAYMENT_REMINDERS
+from pfbc_bot.schemas.settings import (
+    MAX_PAYMENT_REMINDER_INTERVAL_HOURS,
+    MAX_PAYMENT_REMINDERS,
+    SquadSettings,
+)
 from pfbc_bot.schemas.squads import UserContext
 from pfbc_bot.schemas.users import UserDTO
 from pfbc_bot.services.common import (
@@ -57,7 +75,7 @@ from pfbc_bot.services.events import (
     to_dtos,
 )
 from pfbc_bot.services.permissions import Recipients, require
-from pfbc_bot.services.ports import Notifier
+from pfbc_bot.services.ports import InlineButton, Notifier
 from pfbc_bot.services.settings import load_squad_settings
 from pfbc_bot.texts import ru
 
@@ -68,6 +86,8 @@ MATCHES_WINDOW = (timedelta(days=14), timedelta(days=60))
 # напоминание давно пропущено (бот был выключен) — не догоняем
 REMINDER_GRACE = timedelta(days=2)
 # сборы, по которым ещё может быть напоминание: последнее — через (count − 1) × interval
+# уведомления «отметились N игроков» — по матчам в ближайшие столько дней
+ROSTER_NOTICE_HORIZON = timedelta(days=60)
 REMINDER_LOOKBACK = (
     timedelta(hours=(MAX_PAYMENT_REMINDERS - 1) * MAX_PAYMENT_REMINDER_INTERVAL_HOURS)
     + REMINDER_GRACE
@@ -99,6 +119,31 @@ class PaymentStatus:
     unpaid: list[str]
     others_paid: list[str]  # отметили «Оплатил», но не «Буду (игрок)»
     closed: bool  # сбор завершён: опрос закрыт, напоминаний нет
+
+
+@dataclass(frozen=True, slots=True)
+class RosterCandidate:
+    user: UserDTO
+    voted: bool  # ответил «Буду (игрок)»
+
+
+@dataclass(frozen=True, slots=True)
+class RosterChoice:
+    """Выбор заявки: ответившие «Буду (игрок)» (по времени ответа), затем остальные активные
+    участники (по имени); preselected — первые max_players ответивших."""
+
+    event: EventDTO
+    tz: str
+    candidates: list[RosterCandidate]
+    preselected: list[int]
+    max_players: int
+    has_payment: bool  # сбор уже объявлен
+
+
+@dataclass(frozen=True, slots=True)
+class PaymentPreview:
+    roster: str  # «Состав на матч»
+    post: str  # пост сбора
 
 
 class GamePaymentService:
@@ -186,49 +231,63 @@ class GamePaymentService:
     async def create(
         self, actor: UserContext, data: GamePaymentCreate, *, now: datetime | None = None
     ) -> GamePaymentDTO:
-        """Пост в топике match: игра, сумма, получатель и его реквизиты, срок — и опрос
-        «Оплатил». Прежний сбор по этой игре и голосование участия в ней закрываются (платят
-        ответившие «Буду (игрок)» — состав больше не меняется). Реквизиты запоминаются у получателя.
+        """В топик match: «Состав на матч» (заявка), пост сбора (игра, сумма, получатель,
+        реквизиты, срок) и опрос «Оплатил». Голосование участия закрывается — состав
+        зафиксирован. Прежний сбор по игре заменяется (replace_active) или — отказ.
 
-        В две фазы, чтобы отправка не держала транзакцию: проверки → пост и опрос в группе
-        (опрос не принят — пост удаляется, сбор не создаётся) → под блокировкой матча запись
-        сбора и закрытие прежнего (действующий сбор на матч — один, это гарантирует и БД)."""
+        В две фазы, чтобы отправка не держала транзакцию: проверки → сообщения в группе (что-то
+        не принято — отправленное удаляется, сбор не создаётся) → под блокировкой матча запись
+        сбора с заявкой и закрытие прежнего (действующий сбор на матч — один, это гарантирует
+        и БД). Реквизиты здесь не запоминаются — тренер сохраняет их сам (вопрос после ввода)."""
         now = now or utcnow()
         if data.deadline_at is not None and data.deadline_at <= now:
             raise Conflict(ru.PAST_DATE)
         async with self._uow_factory() as uow:
             match = await self._match(uow, actor, data.match_event_id)
+            if not data.replace_active and await uow.game_payments.active_for_event(match.id):
+                raise Conflict(ru.GAME_PAYMENT_ALREADY)
             destination = await resolve_destination(uow, match.squad_id, TopicPurpose.MATCH)
             if destination is None:
                 raise Conflict(ru.POLL_NO_CHAT)
             collector = await self._collector(uow, actor, match.squad_id, data.collector_user_id)
             details = self._details_for(actor, collector, data)
+            players = await _roster_players(uow, match.squad_id, data.player_ids)
             tz = squad_tz(await uow.squads.get(match.squad_id))
             [event] = await to_dtos(uow, [match])
-            post = format_payment_post(event, data.amount, collector, details, data.deadline_at, tz)
+            roster_post = format_roster_post(event, players, tz)
+            post = format_payment_post(
+                event, data.amount, collector, details, data.deadline_at, tz, len(players)
+            )
             question = ru.GAME_PAYMENT_POLL_QUESTION.format(
                 title=match.title, amount=format_amount(data.amount)
             )[:300]
 
-        post_id = await self._notifier.send_message(
-            destination.chat_id, post, thread_id=destination.thread_id
-        )
-        if post_id is None:
-            raise Conflict(ru.GAME_PAYMENT_NOT_SENT)
+        chat_id, thread_id = destination.chat_id, destination.thread_id
+        sent_ids: list[int] = []  # что удалить, если сбор не состоится
+        for text in (roster_post, post):
+            message_id = await self._notifier.send_message(chat_id, text, thread_id=thread_id)
+            if message_id is None:
+                await self._delete(chat_id, sent_ids)
+                raise Conflict(ru.GAME_PAYMENT_NOT_SENT)
+            sent_ids.append(message_id)
+        roster_id = sent_ids[0]
         sent = await self._notifier.send_poll(
-            destination.chat_id,
-            question,
-            GAME_PAYMENT_POLL_OPTIONS,
-            thread_id=destination.thread_id,
+            chat_id, question, GAME_PAYMENT_POLL_OPTIONS, thread_id=thread_id
         )
-        if sent is None:  # пост без опроса в группе не оставляем
-            await self._notifier.delete_message(destination.chat_id, post_id)
+        if sent is None:  # состав и пост без опроса в группе не оставляем
+            await self._delete(chat_id, sent_ids)
             raise Conflict(ru.GAME_PAYMENT_NOT_SENT)
 
         async with self._uow_factory() as uow:
             match = await self._match(uow, actor, data.match_event_id, lock=True)
             previous = await uow.game_payments.active_for_event(match.id)
+            if previous is not None and not data.replace_active:
+                # пока отправляли, сбор объявил другой тренер — наш убираем
+                await uow.rollback()
+                await self._delete(chat_id, [*sent_ids, sent.message_id])
+                raise Conflict(ru.GAME_PAYMENT_ALREADY)
             previous_poll = await self._cancel(uow, previous, now) if previous else None
+            previous_roster = previous.roster_message_id if previous else None
             # сбор объявлен — состав на игру зафиксирован: голосование участия закрывается
             match_poll = await uow.polls.get_for_ref(PollType.MATCH, EVENT_REF, match.id)
             if match_poll is not None and match_poll.closed_at is None:
@@ -244,8 +303,10 @@ class GamePaymentService:
                     details=details.model_dump(mode="json"),
                     created_by_user_id=actor.user.id,
                     collector_user_id=collector.id,
+                    roster_message_id=roster_id,
                 )
             )
+            await uow.game_payments.add_players(payment.id, data.player_ids)
             await uow.polls.add(
                 Poll(
                     type=PollType.GAME_PAYMENT,
@@ -253,30 +314,38 @@ class GamePaymentService:
                     ref_type=GAME_PAYMENT_REF,
                     ref_id=payment.id,
                     tg_poll_id=sent.poll_id,
-                    chat_id=destination.chat_id,
+                    chat_id=chat_id,
                     message_id=sent.message_id,
                     question=question,
                     options=list(GAME_PAYMENT_POLL_OPTIONS),
                     closes_at=None,  # «Оплатил» можно отметить и после срока
                 )
             )
-            if collector.id == actor.user.id:  # свои новые реквизиты — запоминаем; чужие не трогаем
-                me = await uow.users.get(actor.user.id)
-                if me is not None:
-                    _remember(me, details)
+            hidden = await _hide_notices(uow, now, event_id=match.id)
             await uow.system.audit(
                 actor_user_id=actor.user.id,
                 action="game_payment.create",
                 entity="event",
                 entity_id=match.id,
-                payload={"payment_id": payment.id, "amount": str(data.amount)},
+                payload={
+                    "payment_id": payment.id,
+                    "amount": str(data.amount),
+                    "players": len(data.player_ids),
+                },
             )
             await uow.commit()
             dto = GamePaymentDTO.model_validate(payment)
         for poll in (previous_poll, match_poll):
             if poll is not None:
                 await self._notifier.stop_poll(poll.chat_id, poll.message_id)
+        if previous_roster is not None:  # прежний состав в группе больше не действует
+            await self._notifier.delete_message(chat_id, previous_roster)
+        await self._strip_buttons(hidden)
         return dto
+
+    async def _delete(self, chat_id: int, message_ids: list[int]) -> None:
+        for message_id in message_ids:
+            await self._notifier.delete_message(chat_id, message_id)
 
     @staticmethod
     async def _match(
@@ -289,36 +358,82 @@ class GamePaymentService:
         return match
 
     async def suggest_amount(
-        self, actor: UserContext, match_event_id: int
+        self, actor: UserContext, match_event_id: int, players: int
     ) -> AmountSuggestion | None:
-        """Подсказка суммы, если матч — в турнире со стоимостью игры и есть игроки."""
+        """Подсказка суммы с игрока: стоимость игры турнира ÷ заявка (вверх до рубля); None —
+        матч не в турнире или стоимость не указана."""
+        if players < 1:
+            return None
         async with self._uow_factory() as uow:
-            match = await uow.events.get(match_event_id)
-            if match is None or match.type != EventType.MATCH:
-                raise NotFound(ru.TOURNAMENT_MATCH_NOT_FOUND)
-            require(actor, match.squad_id, Permission.GAME_PAYMENTS)
-            tournament = await uow.events.get(match.tournament_id) if match.tournament_id else None
-            if tournament is None or tournament.game_price is None:
-                return None
-            players = await _players(uow, match.squad_id, match.id)
-            if not players:
-                return None
-            price = tournament.game_price
-            per_player = (price / len(players)).to_integral_value(rounding=ROUND_CEILING)
-            return AmountSuggestion(game_price=price, players=len(players), per_player=per_player)
+            match = await self._match(uow, actor, match_event_id)
+            price = await _game_price(uow, match)
+            return _suggestion(price, players) if price is not None else None
 
-    async def preview(self, actor: UserContext, data: GamePaymentCreate) -> str:
-        """Текст поста — показать тренеру перед публикацией."""
+    async def roster(self, actor: UserContext, match_event_id: int) -> RosterChoice:
+        """Кандидаты в заявку: ответившие «Буду (игрок)», затем остальные участники."""
         async with self._uow_factory() as uow:
-            match = await uow.events.get(data.match_event_id)
-            if match is None or match.type != EventType.MATCH:
-                raise NotFound(ru.TOURNAMENT_MATCH_NOT_FOUND)
-            require(actor, match.squad_id, Permission.GAME_PAYMENTS)
+            match = await self._match(uow, actor, match_event_id)
+            settings = await load_squad_settings(uow, match.squad_id)
+            members = await _active_members(uow, match.squad_id)
+            voted = [uid for uid in await _voted_ids(uow, match.id) if uid in members]
+            others = sorted(
+                (u for uid, u in members.items() if uid not in set(voted)), key=_name_key
+            )
+            [event] = await to_dtos(uow, [match])
+            return RosterChoice(
+                event=event,
+                tz=squad_tz(await uow.squads.get(match.squad_id)),
+                candidates=[RosterCandidate(to_dto(members[uid]), True) for uid in voted]
+                + [RosterCandidate(to_dto(u), False) for u in others],
+                preselected=voted[: settings.game_roster_max],
+                max_players=settings.game_roster_max,
+                has_payment=await uow.game_payments.active_for_event(match.id) is not None,
+            )
+
+    async def start_collection(
+        self, actor: UserContext, match_event_id: int, *, now: datetime | None = None
+    ) -> None:
+        """«Начать сбор» из уведомления: состав фиксируется — голосование участия закрывается,
+        кнопки в уведомлениях снимаются. Повторно (тренер бросил выбор заявки) — сценарий
+        продолжается. Уже объявленный сбор не перебивается; получатель денег — сам нажавший,
+        это проверяется до закрытия опроса."""
+        now = now or utcnow()
+        async with self._uow_factory() as uow:
+            match = await self._match(uow, actor, match_event_id, lock=True)
+            await self._collector(uow, actor, match.squad_id, actor.user.id)
+            if await uow.game_payments.active_for_event(match.id) is not None:
+                raise Conflict(ru.GAME_PAYMENT_ALREADY)
+            poll = await uow.polls.get_for_ref(PollType.MATCH, EVENT_REF, match.id)
+            to_stop = poll if poll is not None and poll.closed_at is None else None
+            if to_stop is not None:
+                to_stop.closed_at = now
+            hidden = await _hide_notices(uow, now, event_id=match.id)
+            await uow.system.audit(
+                actor_user_id=actor.user.id,
+                action="game_payment.start",
+                entity="event",
+                entity_id=match.id,
+            )
+            await uow.commit()
+        if to_stop is not None:
+            await self._notifier.stop_poll(to_stop.chat_id, to_stop.message_id)
+        await self._strip_buttons(hidden)
+
+    async def preview(self, actor: UserContext, data: GamePaymentCreate) -> PaymentPreview:
+        """«Состав на матч» и пост сбора — показать тренеру перед публикацией."""
+        async with self._uow_factory() as uow:
+            match = await self._match(uow, actor, data.match_event_id)
             collector = await self._collector(uow, actor, match.squad_id, data.collector_user_id)
             details = self._details_for(actor, collector, data)
+            players = await _roster_players(uow, match.squad_id, data.player_ids)
             tz = squad_tz(await uow.squads.get(match.squad_id))
             [event] = await to_dtos(uow, [match])
-            return format_payment_post(event, data.amount, collector, details, data.deadline_at, tz)
+            return PaymentPreview(
+                roster=format_roster_post(event, players, tz),
+                post=format_payment_post(
+                    event, data.amount, collector, details, data.deadline_at, tz, len(players)
+                ),
+            )
 
     @staticmethod
     async def _cancel(uow: UnitOfWork, payment: GamePayment, now: datetime) -> Poll | None:
@@ -327,6 +442,128 @@ class GamePaymentService:
         if poll is not None:
             await uow.polls.supersede(poll, now)
         return poll
+
+    # --- «Буду (игрок)» отметили N: тренерам и админам, кнопка «Начать сбор» ---
+    async def send_roster_updates(self, *, now: datetime | None = None) -> int:
+        """Тик worker-а (раз в минуту): по будущим матчам с открытым голосованием и без сбора —
+        первое сообщение, когда «Буду (игрок)» набралось game_payment_squad_size, дальше — при
+        каждом изменении числа (изменения за минуту — одним сообщением; вернулось к прежнему —
+        ничего). Кнопка — только в последнем сообщении: у прежних снимается. Возвращает число
+        разосланных уведомлений."""
+        now = now or utcnow()
+        async with self._uow_factory() as uow:
+            match_ids = [
+                m.id
+                for m in await uow.events.list_of_type(
+                    EventType.MATCH, now, now + ROSTER_NOTICE_HORIZON
+                )
+            ]
+        sent = 0
+        for match_id in match_ids:
+            sent += await self._roster_update(match_id, now)
+        await self._hide_stale_notices(now)
+        return sent
+
+    async def _roster_update(self, match_id: int, now: datetime) -> int:
+        async with self._uow_factory() as uow:
+            match = await uow.events.get(match_id)
+            if match is None or match.starts_at is None or match.starts_at <= now:
+                return 0
+            settings = await load_squad_settings(uow, match.squad_id)
+            if settings.game_payment_squad_size == 0:
+                return 0
+            poll = await uow.polls.get_for_ref(PollType.MATCH, EVENT_REF, match.id)
+            if poll is None or poll.closed_at is not None:
+                return 0
+            if await uow.game_payments.active_for_event(match.id) is not None:
+                return 0
+            count = await _voted_count(uow, match.squad_id, match.id)
+            last = await uow.game_payments.last_notice(poll.id)
+            if last is None and count < settings.game_payment_squad_size:
+                return 0
+            if last is not None and last.players == count:
+                return 0
+            hidden = await _hide_notices(uow, now, poll_id=poll.id)
+            tz = squad_tz(await uow.squads.get(match.squad_id))
+            [event] = await to_dtos(uow, [match])
+            text = format_roster_notice(
+                event,
+                tz,
+                count,
+                last.players if last is not None else None,
+                settings,
+                has_price=await _game_price(uow, match) is not None,
+            )
+            keyboard = [
+                [
+                    InlineButton(
+                        ru.ROSTER_BTN_START,
+                        callbacks.pack(callbacks.ROSTER, callbacks.ROSTER_START, match.id),
+                    )
+                ]
+            ]
+            delivered = 0
+            for user in await self._roster_recipients(uow, match.squad_id):
+                message_id = await self._notifier.send_message(
+                    user.tg_user_id, text, keyboard=keyboard
+                )
+                user.dm_available = message_id is not None
+                delivered += message_id is not None
+                # и недоставленное запоминается: число учтено, повторять каждую минуту незачем
+                await uow.game_payments.add_notice(
+                    RosterNotice(
+                        event_id=match.id,
+                        poll_id=poll.id,
+                        user_id=user.id,
+                        chat_id=user.tg_user_id,
+                        message_id=message_id,
+                        text=text,
+                        players=count,
+                        hidden_at=None if message_id is not None else now,
+                    )
+                )
+            await uow.commit()
+        await self._strip_buttons(hidden)
+        log.info("roster_notice_sent", event_id=match_id, players=count, delivered=delivered)
+        return 1
+
+    async def _roster_recipients(self, uow: UnitOfWork, squad_id: int) -> list[User]:
+        """Тренерам (право сбора денег) и админам — участникам состава; нет таких — корневым
+        админам (как Recipients)."""
+        holders = await self._recipients.with_permission(uow, squad_id, Permission.GAME_PAYMENTS)
+        admins = [
+            u
+            for u in (await _active_members(uow, squad_id)).values()
+            if self._recipients.is_admin(u)
+        ]
+        return list({u.id: u for u in [*holders, *admins]}.values())
+
+    async def _hide_stale_notices(self, now: datetime) -> None:
+        """Кнопки уведомлений, по которым начать сбор уже нельзя или незачем: голосование
+        закрыто или устарело (матч перенесли), сбор начат, матч удалён или начался."""
+        async with self._uow_factory() as uow:
+            stale: list[RosterNotice] = []
+            for notice in await uow.game_payments.visible_notices():
+                poll = await uow.polls.get_by_id(notice.poll_id)
+                match = await uow.events.get(notice.event_id)
+                if (
+                    poll is None
+                    or poll.closed_at is not None
+                    or poll.superseded_at is not None
+                    or match is None
+                    or match.starts_at is None
+                    or match.starts_at <= now
+                    or await uow.game_payments.active_for_event(notice.event_id) is not None
+                ):
+                    notice.hidden_at = now
+                    stale.append(notice)
+            await uow.commit()
+        await self._strip_buttons(stale)
+
+    async def _strip_buttons(self, notices: list[RosterNotice]) -> None:
+        for notice in notices:
+            if notice.message_id is not None:
+                await self._notifier.edit_message(notice.chat_id, notice.message_id, notice.text)
 
     # --- реквизиты: задаёт, меняет и удаляет только сам пользователь ---
     async def details_of(self, user_id: int) -> list[PaymentDetails]:
@@ -549,10 +786,11 @@ class GamePaymentService:
 async def _players_and_paid(
     uow: UnitOfWork, payment: GamePayment
 ) -> tuple[dict[int, User], dict[int, User]]:
-    """Игроки — ответившие «Буду (игрок)» в опросе участия; оплатившие — «Оплатил».
-    Только активные участники состава (вышедшим из группы не напоминаем)."""
+    """Игроки — заявка сбора (у сборов до появления заявки — ответившие «Буду (игрок)»);
+    оплатившие — «Оплатил». Только активные участники состава (вышедшим не напоминаем)."""
     members = await _active_members(uow, payment.squad_id)
-    player_ids = await _player_ids(uow, payment.event_id)
+    roster = await uow.game_payments.player_ids(payment.id)
+    player_ids = roster if roster is not None else set(await _voted_ids(uow, payment.event_id))
     paid_ids: set[int] = set()
     pay_poll = await uow.polls.get_for_ref(PollType.GAME_PAYMENT, GAME_PAYMENT_REF, payment.id)
     if pay_poll is not None:
@@ -572,22 +810,60 @@ async def _active_members(uow: UnitOfWork, squad_id: int) -> dict[int, User]:
     }
 
 
-async def _player_ids(uow: UnitOfWork, match_event_id: int) -> set[int]:
-    """Ответившие «Буду (игрок)» в опросе участия в матче."""
+async def _voted_ids(uow: UnitOfWork, match_event_id: int) -> list[int]:
+    """Ответившие «Буду (игрок)» в действующем опросе участия — по времени ответа."""
     match_poll = await uow.polls.get_for_ref(PollType.MATCH, EVENT_REF, match_event_id)
     if match_poll is None:
-        return set()
+        return []
     player_idx = _option_index(match_poll, MATCH_POLL_PLAYER)
     if player_idx is None:
-        return set()
-    answers = await uow.polls.answers(match_poll.id)
-    return {uid for uid, chosen in answers.items() if player_idx in chosen}
+        return []
+    return [
+        uid
+        for uid, chosen in await uow.polls.answers_by_time(match_poll.id)
+        if player_idx in chosen
+    ]
 
 
-async def _players(uow: UnitOfWork, squad_id: int, match_event_id: int) -> list[User]:
+async def _voted_count(uow: UnitOfWork, squad_id: int, match_event_id: int) -> int:
+    """Сколько активных участников ответили «Буду (игрок)»."""
     members = await _active_members(uow, squad_id)
-    player_ids = await _player_ids(uow, match_event_id)
-    return [u for uid, u in members.items() if uid in player_ids]
+    return sum(uid in members for uid in await _voted_ids(uow, match_event_id))
+
+
+async def _roster_players(uow: UnitOfWork, squad_id: int, player_ids: list[int]) -> list[User]:
+    """Заявка: не больше game_roster_max, только активные участники состава."""
+    settings = await load_squad_settings(uow, squad_id)
+    if len(player_ids) > settings.game_roster_max:
+        raise Conflict(ru.ROSTER_TOO_MANY.format(max=settings.game_roster_max))
+    members = await _active_members(uow, squad_id)
+    if any(uid not in members for uid in player_ids):
+        raise Conflict(ru.ROSTER_NOT_MEMBERS)
+    return [members[uid] for uid in player_ids]
+
+
+async def _game_price(uow: UnitOfWork, match: Event) -> Decimal | None:
+    tournament = await uow.events.get(match.tournament_id) if match.tournament_id else None
+    return tournament.game_price if tournament is not None else None
+
+
+def _suggestion(price: Decimal, players: int) -> AmountSuggestion:
+    per_player = (price / players).to_integral_value(rounding=ROUND_CEILING)
+    return AmountSuggestion(game_price=price, players=players, per_player=per_player)
+
+
+def _name_key(user: User) -> str:
+    return to_dto(user).display_name.casefold()
+
+
+async def _hide_notices(
+    uow: UnitOfWork, now: datetime, *, poll_id: int | None = None, event_id: int | None = None
+) -> list[RosterNotice]:
+    """Снять кнопку «Начать сбор» (в БД; в Telegram — _strip_buttons после commit)."""
+    notices = await uow.game_payments.visible_notices(poll_id=poll_id, event_id=event_id)
+    for notice in notices:
+        notice.hidden_at = now
+    return notices
 
 
 def _option_index(poll: Poll, label: str) -> int | None:
@@ -612,8 +888,10 @@ def format_payment_post(
     details: PaymentDetails,
     deadline_at: datetime | None,
     tz: str,
+    players: int,
 ) -> str:
-    """Пост о сборе: игра со всей информацией, ниже — реквизиты, сумма и срок."""
+    """Пост о сборе: игра со всей информацией, ниже — реквизиты, сумма и срок. Список
+    игроков — в «Составе на матч» над постом."""
     deadline = (
         ru.GAME_PAYMENT_DEADLINE.format(when=format_local(deadline_at, tz)) if deadline_at else ""
     )
@@ -623,15 +901,65 @@ def format_payment_post(
         collector=mention(collector),  # пост — в группе: упоминание работает всегда
         details=details.text,
         deadline=deadline,
+        players=players,
+    )
+
+
+def format_match_when(event: EventDTO, tz: str) -> str:
+    """«сб, 18.10 · 12:30»."""
+    if event.starts_at is None:
+        return format_when(event, tz)
+    local = to_local(event.starts_at, tz)
+    return f"{WEEKDAY_SHORT[local.weekday()]}, {local:%d.%m · %H:%M}"
+
+
+def format_roster_post(event: EventDTO, players: list[User], tz: str) -> str:
+    """«Состав на матч» для группы: что, когда, где, кто. Игроки — по алфавиту, упоминаниями
+    (включённые получают уведомление)."""
+    names = sorted(players, key=_name_key)
+    return ru.ROSTER_POST.format(
+        title=html.escape(event.title),
+        when=format_match_when(event, tz),
+        place=f"\n📍 {html.escape(event.place)}" if event.place else "",
+        tournament=(
+            f"\n🏆 {html.escape(event.tournament_title)}" if event.tournament_title else ""
+        ),
+        description=f"\n{html.escape(event.description)}" if event.description else "",
+        count=len(names),
+        players="\n".join(f"{n}. {mention(u)}" for n, u in enumerate(names, 1)),
+    )
+
+
+def format_roster_notice(
+    event: EventDTO,
+    tz: str,
+    count: int,
+    previous: int | None,
+    settings: SquadSettings,
+    has_price: bool,
+) -> str:
+    """Тренеру/админу: сколько отметили «Буду (игрок)» (и сколько было) и что учесть."""
+    hints = []
+    if count > settings.game_roster_max:
+        hints.append(ru.ROSTER_NOTICE_TOO_MANY.format(max=settings.game_roster_max))
+    if count < settings.game_payment_squad_size:
+        hints.append(
+            ru.ROSTER_NOTICE_SHORT.format(
+                size=settings.game_payment_squad_size,
+                missing=settings.game_payment_squad_size - count,
+            )
+        )
+    if not has_price:
+        hints.append(ru.ROSTER_NOTICE_NO_PRICE)
+    template = ru.ROSTER_NOTICE_FIRST if previous is None else ru.ROSTER_NOTICE_UPDATE
+    return template.format(
+        title=html.escape(event.title),
+        when=format_match_when(event, tz),
+        count=count,
+        previous=previous,
+        hints="".join(f"\n{h}" for h in hints),
     )
 
 
 def _store(user: User, details: list[PaymentDetails]) -> None:
     user.payment_details = [d.model_dump(mode="json") for d in details] or None
-
-
-def _remember(user: User, details: PaymentDetails) -> None:
-    """Новые свои реквизиты из сбора — в список (такие же уже есть — не дублируем)."""
-    existing = parse_details_list(user.payment_details)
-    if not any(d.same_as(details) for d in existing) and len(existing) < MAX_DETAILS:
-        _store(user, [*existing, details])
