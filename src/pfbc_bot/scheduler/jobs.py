@@ -1,7 +1,8 @@
 """Плановые задачи worker-а.
 
 Каждая задача — «тик»: сама смотрит в БД, что пора сделать. Идемпотентность — reminder_log,
-поэтому рестарт безопасен, а пропущенное догоняется следующим тиком.
+поэтому рестарт безопасен, а пропущенное догоняется следующим тиком. Одну задачу одновременно
+выполняет только один worker на БД (advisory lock, scheduler/locks.py).
 """
 
 from collections.abc import Awaitable, Callable
@@ -13,6 +14,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from pfbc_bot.logging import get_logger
+from pfbc_bot.scheduler.locks import JobLocks
 from pfbc_bot.services.container import Services
 
 log = get_logger(__name__)
@@ -63,24 +65,30 @@ def build_jobs(services: Services, timezone: str) -> list[Job]:
     ]
 
 
-def _safe(job: Job) -> Callable[[], Awaitable[None]]:
+def _safe(job: Job, locks: JobLocks | None = None) -> Callable[[], Awaitable[None]]:
     async def runner() -> None:
+        if locks is not None and not await locks.try_acquire(job.name):
+            log.info("job_skipped_locked", job=job.name)  # выполняет другой worker
+            return
         try:
             result = await job.run()
             log.debug("job_done", job=job.name, result=result)
         except Exception:
             log.exception("job_failed", job=job.name)
+        finally:
+            if locks is not None:
+                await locks.release(job.name)
 
     return runner
 
 
 def register_jobs(
-    scheduler: AsyncIOScheduler, jobs: list[Job]
+    scheduler: AsyncIOScheduler, jobs: list[Job], locks: JobLocks | None = None
 ) -> list[Callable[[], Awaitable[None]]]:
     """Регистрирует задачи; возвращает те, что нужно выполнить сразу при старте."""
     on_start = []
     for job in jobs:
-        runner = _safe(job)
+        runner = _safe(job, locks)
         scheduler.add_job(
             runner,
             job.trigger,
