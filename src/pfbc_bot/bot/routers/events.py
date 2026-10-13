@@ -28,7 +28,13 @@ from pfbc_bot.bot.keyboards.common import (
     skip_keyboard,
     yes_no_keyboard,
 )
-from pfbc_bot.bot.states import EventCreation, EventMove, ReviewTime, TournamentPrice
+from pfbc_bot.bot.states import (
+    EventCreation,
+    EventMove,
+    ReviewTime,
+    TournamentEdit,
+    TournamentPrice,
+)
 from pfbc_bot.domain.dates import (
     format_interval,
     format_local,
@@ -46,6 +52,7 @@ from pfbc_bot.schemas.events import EventCreate, EventDTO, ScheduleConflict, Tou
 from pfbc_bot.schemas.squads import SquadDTO, UserContext
 from pfbc_bot.services.container import Services
 from pfbc_bot.services.events import (
+    DIVISION_MAX,
     ScheduleConflictError,
     event_permission,
     format_conflicts,
@@ -63,7 +70,7 @@ ADD, REVIEW_ADD = "ev_add", "ev_review"
 TYPE_FLOW, DURATION_FLOW, CONFLICT_FLOW = "ev_type", "ev_dur", "ev_conf"
 TITLE_FLOW, WHEN_FLOW, TOURNAMENT_FLOW = "ev_title", "ev_when", "ev_trn"
 TOURNAMENT_START_FLOW, TOURNAMENT_LENGTH_FLOW = "ev_tstart", "ev_tlen"
-GAME_PRICE_FLOW = "ev_price"
+GAME_PRICE_FLOW, DIVISION_FLOW = "ev_price", "ev_div"
 PLACE_FLOW, DESCRIPTION_FLOW, PUBLISH_FLOW = "ev_place", "ev_descr", "ev_pub"
 DURATION_OPTIONS = (60, 90, 120, 180)
 
@@ -475,11 +482,34 @@ async def on_game_price(message: Message, state: FSMContext) -> None:
         await message.answer(str(exc))
         return
     await state.update_data(game_price=str(price))
-    await _ask_place(message, state)
+    await _ask_division(message, state)
 
 
 @router.callback_query(EventCreation.game_price, Choice.filter(F.flow == GAME_PRICE_FLOW))
 async def on_game_price_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if message := callback_message(callback):
+        await message.edit_reply_markup(reply_markup=None)
+        await _ask_division(message, state)
+
+
+async def _ask_division(message: Message, state: FSMContext) -> None:
+    await state.set_state(EventCreation.division)
+    await message.answer(ru.TOURNAMENT_ASK_DIVISION, reply_markup=skip_keyboard(DIVISION_FLOW))
+
+
+@router.message(EventCreation.division, F.text)
+async def on_division(message: Message, state: FSMContext) -> None:
+    division = (message.text or "").strip()
+    if len(division) > DIVISION_MAX:
+        await message.answer(ru.TOURNAMENT_BAD_DIVISION)
+        return
+    await state.update_data(division=division or None)
+    await _ask_place(message, state)
+
+
+@router.callback_query(EventCreation.division, Choice.filter(F.flow == DIVISION_FLOW))
+async def on_division_skip(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     if message := callback_message(callback):
         await message.edit_reply_markup(reply_markup=None)
@@ -640,6 +670,8 @@ def _summary(data: dict[str, object]) -> str:
             type=EVENT_TYPE_TITLES[event_type], title=html.escape(str(data["title"])), when=when
         )
     ]
+    if data.get("division"):
+        lines.append(f"🏷 {html.escape(str(data['division']))}")
     if data.get("place"):
         lines.append(f"📍 {html.escape(str(data['place']))}")
     if data.get("description"):
@@ -683,6 +715,7 @@ async def _create(
                 is_season=bool(data.get("is_season")),
                 tournament_id=data.get("tournament_id"),
                 game_price=Decimal(data["game_price"]) if data.get("game_price") else None,
+                division=data.get("division"),
                 place=data.get("place"),
                 description=data.get("description"),
                 notify_group=bool(data.get("publish")),
@@ -748,6 +781,7 @@ def _tournament_text(card: TournamentCard) -> str:
         title=html.escape(card.tournament.title),
         squad=html.escape(card.squad_name),
         when=format_when(card.tournament, card.tz),
+        division=html.escape(card.tournament.division or ru.NOT_SET),
         price=format_amount(price) if price is not None else ru.NOT_SET,
     )
     return text if card.matches else text + ru.TOURNAMENT_NO_MATCHES
@@ -755,10 +789,15 @@ def _tournament_text(card: TournamentCard) -> str:
 
 def _tournament_markup(card: TournamentCard) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(
-        text=ru.TOURNAMENT_BTN_GAME_PRICE,
-        callback_data=ItemAction(kind="trn", action="price", item_id=card.tournament.id),
-    )
+    for text, action in (
+        (ru.TOURNAMENT_BTN_TITLE, "title"),
+        (ru.TOURNAMENT_BTN_DIVISION, "division"),
+        (ru.TOURNAMENT_BTN_GAME_PRICE, "price"),
+    ):
+        builder.button(
+            text=text,
+            callback_data=ItemAction(kind="trn", action=action, item_id=card.tournament.id),
+        )
     for match in card.matches:
         linked = match.tournament_id == card.tournament.id
         when = format_short(match, card.tz)
@@ -820,8 +859,81 @@ async def _save_price(
     tournament_id = int((await state.get_data())["tournament_id"])
     await state.clear()
     await services.events.set_game_price(ctx, tournament_id, price)
+    await _show_tournament(message, ctx, services, tournament_id)
+
+
+async def _show_tournament(
+    message: Message, ctx: UserContext, services: Services, tournament_id: int
+) -> None:
     card = await services.events.tournament_card(ctx, tournament_id)
     await message.answer(_tournament_text(card), reply_markup=_tournament_markup(card))
+
+
+@router.callback_query(ItemAction.filter((F.kind == "trn") & (F.action == "title")))
+async def on_tournament_title(
+    callback: CallbackQuery, callback_data: ItemAction, state: FSMContext
+) -> None:
+    await callback.answer()
+    if message := callback_message(callback):
+        await state.set_state(TournamentEdit.title)
+        await state.update_data(tournament_id=callback_data.item_id)
+        await message.answer(ru.TOURNAMENT_ASK_TITLE_EDIT)
+
+
+@router.message(TournamentEdit.title, F.text)
+async def on_tournament_title_value(
+    message: Message, ctx: UserContext, services: Services, state: FSMContext
+) -> None:
+    tournament_id = int((await state.get_data())["tournament_id"])
+    await services.events.rename_tournament(ctx, tournament_id, message.text or "")
+    await state.clear()
+    await _show_tournament(message, ctx, services, tournament_id)
+
+
+@router.callback_query(ItemAction.filter((F.kind == "trn") & (F.action == "division")))
+async def on_tournament_division(
+    callback: CallbackQuery, callback_data: ItemAction, state: FSMContext
+) -> None:
+    await callback.answer()
+    if message := callback_message(callback):
+        await state.set_state(TournamentEdit.division)
+        await state.update_data(tournament_id=callback_data.item_id)
+        await message.answer(
+            ru.TOURNAMENT_ASK_DIVISION_EDIT,
+            reply_markup=choices_keyboard(
+                DIVISION_FLOW, [("clear", ru.TOURNAMENT_BTN_CLEAR_DIVISION)]
+            ),
+        )
+
+
+@router.message(TournamentEdit.division, F.text)
+async def on_tournament_division_value(
+    message: Message, ctx: UserContext, services: Services, state: FSMContext
+) -> None:
+    await _save_division(message, ctx, services, state, message.text or "")
+
+
+@router.callback_query(TournamentEdit.division, Choice.filter(F.flow == DIVISION_FLOW))
+async def on_tournament_division_clear(
+    callback: CallbackQuery, ctx: UserContext, services: Services, state: FSMContext
+) -> None:
+    await callback.answer()
+    if message := callback_message(callback):
+        await message.edit_reply_markup(reply_markup=None)
+        await _save_division(message, ctx, services, state, None)
+
+
+async def _save_division(
+    message: Message,
+    ctx: UserContext,
+    services: Services,
+    state: FSMContext,
+    division: str | None,
+) -> None:
+    tournament_id = int((await state.get_data())["tournament_id"])
+    await services.events.set_division(ctx, tournament_id, division)
+    await state.clear()
+    await _show_tournament(message, ctx, services, tournament_id)
 
 
 # --- разбор игры по предложению после матча ---

@@ -421,10 +421,24 @@ TOURNAMENTS_HEADER = "<b>Турниры</b> — выберите, чтобы п�
 TOURNAMENTS_EMPTY = "Турниров нет. Создайте событие «Турнир»: /event_add"
 TOURNAMENT_CARD = (
     "🏆 <b>{title}</b> ({squad}), {when}\n"
+    "Дивизион: {division}\n"
     "Стоимость одной игры: {price}\n"
     "Матчи турнира отмечены ✅. Нажмите на матч, чтобы привязать или отвязать."
 )
 TOURNAMENT_BTN_GAME_PRICE = "💰 Изменить стоимость игры"
+TOURNAMENT_BTN_TITLE = "✏️ Изменить название"
+TOURNAMENT_BTN_DIVISION = "🏷 Изменить дивизион"
+TOURNAMENT_ASK_TITLE_EDIT = "Новое название турнира:"
+TOURNAMENT_BAD_TITLE = "Название — от 1 до 200 символов."
+TOURNAMENT_ASK_DIVISION = (
+    "Дивизион лиги, например <code>Москвич</code>, — как на mtgame.ru. По нему (или по названию "
+    "турнира) бот привязывает к турниру матчи, найденные на mtgame. Можно пропустить."
+)
+TOURNAMENT_ASK_DIVISION_EDIT = (
+    "Новый дивизион лиги, например <code>Москвич</code> (как на mtgame.ru):"
+)
+TOURNAMENT_BTN_CLEAR_DIVISION = "Убрать дивизион"
+TOURNAMENT_BAD_DIVISION = "Дивизион — до 100 символов."
 TOURNAMENT_ASK_GAME_PRICE = (
     "Стоимость одной игры в турнире (вся сумма за игру, например <code>15000</code>) — "
     "по ней бот посчитает, сколько платит каждый игрок. Можно пропустить."

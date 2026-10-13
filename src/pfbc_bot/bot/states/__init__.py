@@ -32,6 +32,7 @@ class EventCreation(StatesGroup):
     tournament_start = State()
     tournament_length = State()
     game_price = State()
+    division = State()
     duration = State()
     conflict = State()
     place = State()
@@ -47,6 +48,13 @@ class TournamentPrice(StatesGroup):
     """Изменение стоимости одной игры турнира."""
 
     value = State()
+
+
+class TournamentEdit(StatesGroup):
+    """Изменение названия и дивизиона турнира."""
+
+    title = State()
+    division = State()
 
 
 class ReviewTime(StatesGroup):

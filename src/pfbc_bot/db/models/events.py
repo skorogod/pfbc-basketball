@@ -28,6 +28,8 @@ class Event(IdMixin, CreatedAtMixin, Base):
     is_season: Mapped[bool] = mapped_column(default=False, server_default=false())
     # турнир: стоимость одной игры (вся сумма) — для сбора денег с игроков, по желанию
     game_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    # турнир: дивизион лиги (ABL «Москвич») — по нему и названию матчи mtgame находят турнир
+    division: Mapped[str | None] = mapped_column(String(100))
     place: Mapped[str | None] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text)
     notify_group: Mapped[bool] = mapped_column(default=False)

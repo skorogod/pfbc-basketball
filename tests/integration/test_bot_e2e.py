@@ -582,13 +582,26 @@ async def test_tournament_season_and_review_offer_via_bot(
     await harness.press(COACH, Choice(flow="ev_tlen", value="season").pack())
     assert harness.session.texts_to(COACH)[-1] == ru.TOURNAMENT_ASK_GAME_PRICE
     await harness.private(COACH, "15 000")
+    assert harness.session.texts_to(COACH)[-1] == ru.TOURNAMENT_ASK_DIVISION
+    await harness.private(COACH, "Москвич")
     await harness.press(COACH, Choice(flow="ev_place", value="skip").pack())
     await harness.press(COACH, Choice(flow="ev_descr", value="skip").pack())
+    assert "🏷 Москвич" in harness.session.texts_to(COACH)[-1]  # сводка перед публикацией
     await harness.press(COACH, Choice(flow="ev_pub", value="yes").pack())
     assert ru.EVENT_PUBLISHED_WITH_POLL in harness.session.texts_to(COACH)[-1]
     assert "Лига ABL, сезон" in notifier.polls[-1][1]
     [league] = [t for t, _, _ in await services.events.tournaments(admin)]
-    assert league.game_price == Decimal("15000.00")
+    assert league.game_price == Decimal("15000.00") and league.division == "Москвич"
+
+    # карточка турнира: новое название, дивизион убран
+    edit = ItemAction(kind="trn", action="title", item_id=league.id)
+    await harness.press(COACH, edit.pack())
+    await harness.private(COACH, "ABL 2026/27")
+    assert "ABL 2026/27" in harness.session.texts_to(COACH)[-1]
+    await harness.press(COACH, edit.model_copy(update={"action": "division"}).pack())
+    await harness.press(COACH, Choice(flow="ev_div", value="clear").pack())
+    [league] = [t for t, _, _ in await services.events.tournaments(admin)]
+    assert (league.title, league.division) == ("ABL 2026/27", None)
 
     # прошёл матч → тренеру предложение → «Да» → время по умолчанию → «Да, …»
     day = (datetime.now(UTC) + timedelta(days=3)).date()

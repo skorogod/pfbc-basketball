@@ -64,6 +64,7 @@ TOURNAMENTS_WINDOW = (timedelta(days=180), timedelta(days=365))  # назад, �
 REVIEW_DURATION_MINUTES = 60
 # предложение разбора — по матчам, закончившимся не раньше, чем столько назад
 REVIEW_OFFER_WINDOW = timedelta(days=3)
+TITLE_MAX, DIVISION_MAX = 200, 100
 
 
 def review_offer_key(match_event_id: int) -> str:
@@ -661,16 +662,39 @@ class EventService:
         self, actor: UserContext, tournament_id: int, price: Decimal | None
     ) -> EventDTO:
         """Стоимость одной игры турнира (вся сумма); None — не указана."""
+        return await self._update_tournament(actor, tournament_id, game_price=price)
+
+    async def rename_tournament(
+        self, actor: UserContext, tournament_id: int, title: str
+    ) -> EventDTO:
+        title = title.strip()
+        if not 1 <= len(title) <= TITLE_MAX:
+            raise Conflict(ru.TOURNAMENT_BAD_TITLE)
+        return await self._update_tournament(actor, tournament_id, title=title)
+
+    async def set_division(
+        self, actor: UserContext, tournament_id: int, division: str | None
+    ) -> EventDTO:
+        """Дивизион лиги (ABL «Москвич»); None — не указан."""
+        division = division.strip() if division else None
+        if division is not None and len(division) > DIVISION_MAX:
+            raise Conflict(ru.TOURNAMENT_BAD_DIVISION)
+        return await self._update_tournament(actor, tournament_id, division=division or None)
+
+    async def _update_tournament(
+        self, actor: UserContext, tournament_id: int, **fields: str | Decimal | None
+    ) -> EventDTO:
         async with self._uow_factory() as uow:
             tournament = await self._get_tournament(uow, tournament_id)
             require(actor, tournament.squad_id, Permission.EVENTS)
-            tournament.game_price = price
+            for name, value in fields.items():
+                setattr(tournament, name, value)
             await uow.system.audit(
                 actor_user_id=actor.user.id,
-                action="tournament.game_price",
+                action="tournament.update",
                 entity="event",
                 entity_id=tournament.id,
-                payload={"game_price": str(price) if price is not None else None},
+                payload={k: str(v) if v is not None else None for k, v in fields.items()},
             )
             await uow.commit()
             return EventDTO.model_validate(tournament)

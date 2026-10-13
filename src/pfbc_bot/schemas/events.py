@@ -19,6 +19,7 @@ class EventCreate(BaseModel):
     duration_days: int | None = Field(default=None, ge=1, le=366)
     is_season: bool = False
     game_price: Decimal | None = Field(default=None, gt=0, lt=10_000_000)  # турнир
+    division: str | None = Field(default=None, max_length=100)  # турнир: дивизион лиги
     place: str | None = Field(default=None, max_length=255)
     description: str | None = Field(default=None, max_length=2000)
     notify_group: bool = False
@@ -36,6 +37,8 @@ class EventCreate(BaseModel):
             raise ValueError("Дни и сезон указываются только у турнира")
         if self.game_price is not None and self.type != EventType.TOURNAMENT:
             raise ValueError("Стоимость игры указывается только у турнира")
+        if self.division is not None and self.type != EventType.TOURNAMENT:
+            raise ValueError("Дивизион указывается только у турнира")
         if self.tournament_id is not None and self.type != EventType.MATCH:
             raise ValueError("К турниру привязывается только матч")
         return self
@@ -51,6 +54,7 @@ class EventDTO(DTO):
     duration_days: int | None = None
     is_season: bool = False
     game_price: Decimal | None = None
+    division: str | None = None
     place: str | None
     description: str | None
     notify_group: bool
