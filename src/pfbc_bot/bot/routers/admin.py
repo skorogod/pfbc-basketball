@@ -21,11 +21,14 @@ from pfbc_bot.bot.helpers import ask_squad, callback_message
 from pfbc_bot.bot.keyboards.common import Choice, SquadPick
 from pfbc_bot.bot.middlewares.access import to_telegram_user
 from pfbc_bot.bot.states import SettingsEdit
+from pfbc_bot.domain.dates import to_local
 from pfbc_bot.domain.enums import ROLE_TITLES, STAFF_ROLES, SquadRole, TopicPurpose, UserStatus
 from pfbc_bot.logging import get_logger
+from pfbc_bot.schemas.payments import parse_details_list
 from pfbc_bot.schemas.squads import SquadDTO, SquadMemberView, UserContext
 from pfbc_bot.services.container import Services
 from pfbc_bot.services.errors import DomainError
+from pfbc_bot.services.membership import DISCOVERED_FIRST_JOINED_AT
 from pfbc_bot.texts import ru
 
 router = Router(name="admin")
@@ -37,6 +40,7 @@ ROLES_FLOW, SETTINGS_SHOW_FLOW, SETTINGS_SET_FLOW = "roles", "settings_show", "s
 ADMIN_ADD_FLOW = "admin_add"
 MEMBERS_FLOW = "squad_members"
 MESSAGE_LIMIT = 4000  # лимит сообщения Telegram — 4096 символов
+BUTTONS_LIMIT = 90  # кнопок в одном сообщении (лимит Telegram — 100)
 
 
 class RoleAction(CallbackData, prefix="rl"):
@@ -177,6 +181,12 @@ async def on_squad_members(
     ]
     for chunk in _chunks(lines):
         await message.answer(chunk)
+    # карточка участника — по кнопке (та же, что в /roles)
+    for start in range(0, len(members), BUTTONS_LIMIT):
+        await message.answer(
+            ru.SQUAD_MEMBERS_OPEN_CARD,
+            reply_markup=_member_buttons(members[start : start + BUTTONS_LIMIT], squad),
+        )
 
 
 def _member_line(view: SquadMemberView, is_admin: bool) -> str:
@@ -227,6 +237,14 @@ async def _show_members(message: Message, squad: SquadDTO, services: Services) -
     if not members:
         await message.answer(ru.ROLES_EMPTY)
         return
+    await message.answer(
+        ru.ROLES_HEADER.format(squad=html.escape(squad.name)),
+        reply_markup=_member_buttons(members, squad),
+    )
+
+
+def _member_buttons(members: list[SquadMemberView], squad: SquadDTO) -> InlineKeyboardMarkup:
+    """По кнопке на участника — открывает его карточку."""
     builder = InlineKeyboardBuilder()
     for m in members:
         staff = m.roles & STAFF_ROLES
@@ -236,9 +254,7 @@ async def _show_members(message: Message, squad: SquadDTO, services: Services) -
             callback_data=RoleAction(squad_id=squad.id, user_id=m.user.id, action="open"),
         )
     builder.adjust(1)
-    await message.answer(
-        ru.ROLES_HEADER.format(squad=html.escape(squad.name)), reply_markup=builder.as_markup()
-    )
+    return builder.as_markup()
 
 
 @router.callback_query(RoleAction.filter())
@@ -292,14 +308,32 @@ def _role_card(view: SquadMemberView, squad: SquadDTO) -> str:
             value=f"{user.birth_date:%d.%m.%Y}" if user.birth_date else ru.NOT_SET,
         ),
         ru.CARD_FIELD.format(title="mtgame", value=html.escape(user.mtgame_url or ru.NOT_SET)),
-        ru.CARD_FIELD.format(
-            title="В составе с", value=f"{view.membership.first_joined_at:%d.%m.%Y}"
-        ),
+        _joined_line(view, squad.timezone),
+        _details_line(user.payment_details),
         ru.CARD_DM_OPEN if user.dm_available else ru.CARD_DM_CLOSED,
     ]
     if not user.username and not user.knows_bot:
         lines.append(ru.CARD_NO_LINK)
     return "\n".join(lines)
+
+
+def _joined_line(view: SquadMemberView, tz: str) -> str:
+    """Был в группе до подключения бота — дата вступления неизвестна (Telegram её не сообщает);
+    в БД для дежурств у такого стоит заведомо старая дата — её не показываем."""
+    membership = view.membership
+    if membership.first_joined_at == DISCOVERED_FIRST_JOINED_AT:
+        return ru.CARD_JOINED_UNKNOWN.format(seen=f"{to_local(membership.joined_at, tz):%d.%m.%Y}")
+    return ru.CARD_FIELD.format(
+        title="В составе с", value=f"{to_local(membership.first_joined_at, tz):%d.%m.%Y}"
+    )
+
+
+def _details_line(raw: object) -> str:
+    """Реквизиты для сборов — только просмотр: менять их может лишь сам участник."""
+    details = parse_details_list(raw)
+    if not details:
+        return ru.CARD_FIELD.format(title="Реквизиты", value=ru.NOT_SET)
+    return ru.CARD_DETAILS.format(details="\n".join(f"• {d.text}" for d in details))
 
 
 def _role_keyboard(view: SquadMemberView, squad: SquadDTO) -> InlineKeyboardMarkup:

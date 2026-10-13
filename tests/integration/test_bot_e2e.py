@@ -8,6 +8,7 @@ from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from aiogram import Bot, Dispatcher
@@ -37,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from pfbc_bot.bot.factory import create_dispatcher
 from pfbc_bot.bot.keyboards.common import Choice, ItemAction, SquadPick
 from pfbc_bot.bot.middlewares.access import to_telegram_user
-from pfbc_bot.bot.routers.admin import AdminAction, RoleAction
+from pfbc_bot.bot.routers.admin import MEMBERS_FLOW, AdminAction, RoleAction
 from pfbc_bot.bot.routers.events import TournamentLink
 from pfbc_bot.bot.routers.game_payments import DetailsAction, RosterPick
 from pfbc_bot.bot.routers.permissions import PermAction
@@ -233,7 +234,8 @@ async def test_roles_invite_and_settings_in_private_chat(
     await harness.private(ADMIN_TG_ID, "/squads")
     members_btn = SquadPick(flow="squad_members", squad_id=squad.id).pack()
     await harness.press(ADMIN_TG_ID, members_btn)
-    listing = harness.session.texts_to(ADMIN_TG_ID)[-1]
+    listing, open_card = harness.session.texts_to(ADMIN_TG_ID)[-2:]
+    assert open_card == ru.SQUAD_MEMBERS_OPEN_CARD  # следом — кнопки карточек участников
     assert listing.startswith("<b>Участники состава Взрослые</b> — 3:")
     assert (
         "\n1. " in listing and "user100 (не в боте) — тренер · ⚠️ не зарегистрирован(а)" in listing
@@ -1087,3 +1089,41 @@ async def test_admin_sees_member_details(
     card = harness.session.texts_to(ADMIN_TG_ID)[-1]
     assert "Телефон: +79997654321" in card and "Регистрация: ⚠️ не пройдена" in card
     assert ru.CARD_NO_LINK in card  # без username и не писал боту — объясняем, почему без ссылки
+    today = f"{datetime.now(UTC).astimezone(ZoneInfo(MSK)):%d.%m.%Y}"
+    assert f"В составе с: {today}" in card  # вступил при боте — настоящая дата
+    assert "Реквизиты: —" in card
+
+    # реквизиты участника — в карточке (только просмотр)
+    await services.game_payments.add_details(
+        player, PaymentDetails(method=PaymentMethod.CARD, value="4111111111111111", bank="Т-Банк")
+    )
+    # был в группе до подключения бота — дата вступления неизвестна, заглушку не показываем
+    await harness.group(5, "Всем привет!")
+    old_timer = await ctx_of(services, 5)
+
+    # /squads → «Участники» → кнопка участника открывает ту же карточку
+    await harness.private(ADMIN_TG_ID, "/squads")
+    await harness.press(ADMIN_TG_ID, SquadPick(flow=MEMBERS_FLOW, squad_id=squad.id).pack())
+    [markup] = [
+        m.reply_markup
+        for m in harness.session.requests
+        if isinstance(m, SendMessage) and m.text == ru.SQUAD_MEMBERS_OPEN_CARD
+    ]
+    buttons = {
+        b.callback_data
+        for row in markup.inline_keyboard  # type: ignore[union-attr]
+        for b in row
+    }
+    open_player = RoleAction(squad_id=squad.id, user_id=player.user.id, action="open").pack()
+    open_old = RoleAction(squad_id=squad.id, user_id=old_timer.user.id, action="open").pack()
+    assert {open_player, open_old} <= buttons
+    await harness.press(ADMIN_TG_ID, open_player)
+    card = harness.session.texts_to(ADMIN_TG_ID)[-1]
+    assert "Реквизиты:\n• " in card and "4111 1111 1111 1111" in card and "Т-Банк" in card
+    await harness.press(ADMIN_TG_ID, open_old)
+    card = harness.session.texts_to(ADMIN_TG_ID)[-1]
+    assert (
+        f"до подключения бота (дату вступления Telegram не сообщает), бот видит его с {today}"
+        in (card)
+    )
+    assert "01.01.2000" not in card

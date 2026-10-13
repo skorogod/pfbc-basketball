@@ -157,6 +157,10 @@ CARD_NO_USERNAME = "без username"
 CARD_REGISTERED = "Регистрация: пройдена {date}"
 CARD_NOT_REGISTERED = "Регистрация: ⚠️ не пройдена — данных профиля нет"
 CARD_FIELD = "{title}: {value}"
+CARD_JOINED_UNKNOWN = (
+    "В составе: до подключения бота (дату вступления Telegram не сообщает), бот видит его с {seen}"
+)
+CARD_DETAILS = "Реквизиты:\n{details}"
 CARD_DM_OPEN = "Личка с ботом: открыта"
 CARD_DM_CLOSED = "Личка с ботом: ⚠️ закрыта — бот не может написать (нужен /start)"
 CARD_NO_LINK = (
@@ -174,6 +178,7 @@ SETTINGS_SAVED = "✅ Настройка {key} = {value} сохранена ({sc
 SQUAD_MISSING_ROLES = "\n  ⚠️ Не назначен: {roles} — их сообщения получают админы (/roles)."
 SQUAD_MEMBERS_BTN = "👥 Участники: {squad}"
 SQUAD_MEMBERS_HEADER = "<b>Участники состава {squad}</b> — {count}:"
+SQUAD_MEMBERS_OPEN_CARD = "Карточка участника — нажмите на имя:"
 SQUAD_MEMBERS_EMPTY = "В составе <b>{squad}</b> пока нет участников."
 SQUAD_MEMBER_ADMIN = "админ"
 SQUAD_MEMBER_UNREGISTERED = "⚠️ не зарегистрирован(а)"
