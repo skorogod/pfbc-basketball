@@ -11,6 +11,8 @@ from pfbc_bot.domain.payments import normalize_phone
 from pfbc_bot.schemas.base import DTO
 
 MTGAME_DOMAIN = "mtgame.ru"
+# пометка к имени без ссылки: нет username и не писал боту
+NO_LINK_MARK = " (не в боте)"
 
 
 class TelegramUser(BaseModel):
@@ -31,7 +33,7 @@ class UserDTO(DTO):
     birth_date: date | None
     mtgame_url: str | None
     phone: str | None = None
-    payment_details: dict[str, Any] | None = None
+    payment_details: list[Any] | None = None
     pd_consent_at: datetime | None
     is_admin: bool
     dm_available: bool
@@ -56,7 +58,15 @@ class UserDTO(DTO):
         """Ссылка на профиль для списков в личке: нажал — и можно написать человеку.
         По username (t.me) открывается всегда; по id — если человек не запретил это
         в настройках приватности Telegram."""
-        return profile_link(self.tg_user_id, self.username, self.display_name)
+        return profile_link(
+            self.tg_user_id, self.username, self.display_name, knows_bot=self.knows_bot
+        )
+
+    @property
+    def knows_bot(self) -> bool:
+        """Писал ли пользователь боту. Без этого и без username Telegram не подсвечивает
+        ссылку на него в личке — только в группе, где он участник."""
+        return self.dm_available or self.pd_consent_at is not None
 
     @property
     def is_registered(self) -> bool:
@@ -144,6 +154,14 @@ class RegistrationData(BaseModel):
         return value
 
 
-def profile_link(tg_user_id: int, username: str | None, name: str) -> str:
-    href = f"https://t.me/{username}" if username else f"tg://user?id={tg_user_id}"
-    return f'<a href="{href}">{html.escape(name)}</a>'
+def profile_link(
+    tg_user_id: int, username: str | None, name: str, *, knows_bot: bool = True
+) -> str:
+    """Ссылка на профиль для сообщений в личку. По username (t.me) открывается всегда; по id —
+    только если человек писал боту: иначе Telegram показывает её как обычный текст. Для
+    таких — имя с пометкой, без «мёртвой» ссылки (написать ему можно из группы)."""
+    if username:
+        return f'<a href="https://t.me/{username}">{html.escape(name)}</a>'
+    if knows_bot:
+        return f'<a href="tg://user?id={tg_user_id}">{html.escape(name)}</a>'
+    return html.escape(name) + NO_LINK_MARK

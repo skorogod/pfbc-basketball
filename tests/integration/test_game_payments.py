@@ -10,7 +10,7 @@ from pfbc_bot.domain.enums import EventType, SquadRole
 from pfbc_bot.schemas.events import EventCreate
 from pfbc_bot.schemas.payments import GamePaymentCreate, PaymentDetails, PaymentMethod
 from pfbc_bot.services.container import Services
-from pfbc_bot.services.errors import Conflict, PermissionDenied
+from pfbc_bot.services.errors import Conflict, NotFound, PermissionDenied
 
 from .conftest import ADMIN_TG_ID, FakeNotifier
 from .helpers import CHAT_ID, GAMES_THREAD, ctx_of, join, setup_squad
@@ -75,10 +75,12 @@ async def test_payment_post_poll_and_reminders(
     post = notifier.to(CHAT_ID)[-1]
     assert post.thread_id == GAMES_THREAD
     assert "PFBC — Динамо" in post.text and "ФОК" in post.text
-    assert "Сумма: 2 500 ₽" in post.text and "+7 999 123-45-67" in post.text
+    assert "Сумма: 2 500 ₽" in post.text and "+79991234567" in post.text
     assert "Оплатить до" in post.text
     assert notifier.polls[-1] == (CHAT_ID, "💰 Оплата игры «PFBC — Динамо»: 2 500 ₽", GAMES_THREAD)
-    assert await services.game_payments.saved_details(coach.user.id) == DETAILS
+    assert [d.same_as(DETAILS) for d in await services.game_payments.details_of(coach.user.id)] == [
+        True
+    ]
     assert notifier.stopped_polls == [(CHAT_ID, 1001)]  # голосование участия закрыто
     # закрытый опрос участия планировщик не трогает повторно
     assert await services.polls.close_due(now=at(12)) == 0
@@ -99,7 +101,7 @@ async def test_payment_post_poll_and_reminders(
 
     # напоминание — только игроку без «Оплатил»; болельщику и оплатившим — нет
     assert "Напоминание об оплате" in notifier.to(2)[-1].text
-    assert "+7 999 123-45-67" in notifier.to(2)[-1].text
+    assert "+79991234567" in notifier.to(2)[-1].text
     assert not notifier.to(1) and not notifier.to(3) and not notifier.to(4)
     # итог тренеру не шлётся — он виден в опросе
     assert not any("Напоминание" in m.text or "Оплатили" in m.text for m in notifier.to(COACH))
@@ -204,23 +206,30 @@ async def test_admin_collects_for_coach(
     with pytest.raises(Conflict):
         await services.game_payments.create(admin, payment(match_id, None, coach.user.id), now=NOW)
 
-    await services.game_payments.save_details(coach, DETAILS)  # тренер — сам, в /profile
+    await services.game_payments.add_details(coach, DETAILS)  # тренер — сам, в /profile
     collectors = [u.id for u in await services.game_payments.collectors(admin, squad_id)]
     assert collectors == [admin.user.id, coach.user.id]  # сам создающий — первым
 
+    # подменить реквизиты чужого получателя нельзя — только одни из его сохранённых
     forged = PaymentDetails(method=PaymentMethod.CARD, value="4111111111111111", bank="Чужой")
+    with pytest.raises(Conflict):
+        await services.game_payments.create(
+            admin,
+            payment(match_id, NOW + timedelta(hours=2), coach.user.id).model_copy(
+                update={"details": forged}
+            ),
+            now=NOW,
+        )
     await services.game_payments.create(
-        admin,
-        payment(match_id, NOW + timedelta(hours=2), coach.user.id).model_copy(
-            update={"details": forged}
-        ),
-        now=NOW,
+        admin, payment(match_id, NOW + timedelta(hours=2), coach.user.id), now=NOW
     )
     post = notifier.to(CHAT_ID)[-1].text
     assert '👤 Получатель: <a href="tg://user?id=100">user100</a>' in post
-    assert "+7 999 123-45-67" in post and "4111" not in post  # реквизиты — тренера
-    assert await services.game_payments.saved_details(coach.user.id) == DETAILS
-    assert await services.game_payments.saved_details(admin.user.id) is None
+    assert "+79991234567" in post and "4111" not in post  # реквизиты — тренера
+    assert [d.same_as(DETAILS) for d in await services.game_payments.details_of(coach.user.id)] == [
+        True
+    ]
+    assert await services.game_payments.details_of(admin.user.id) == []
 
     # после срока итог получателю и создателю не шлётся — он виден в опросе
     await services.game_payments.remind_due(now=NOW + timedelta(hours=3))
@@ -270,3 +279,62 @@ async def test_closed_payment_poll_stops_reminders(
     assert await services.polls.mark_closed("poll-3", now=NOW) is True
     assert await services.polls.mark_closed("poll-3", now=NOW) is False
     assert await services.game_payments.remind_due(now=at(20)) == 0
+
+
+async def test_several_details_managed_by_owner(services: Services, match_id: int) -> None:
+    """Несколько реквизитов: добавить, изменить, удалить — только свои; лимит."""
+    coach = await ctx_of(services, COACH)
+    card = PaymentDetails(method=PaymentMethod.CARD, value="4111111111111111", bank="Т-Банк")
+    first = await services.game_payments.add_details(coach, DETAILS)
+    second = await services.game_payments.add_details(coach, card)
+    assert await services.game_payments.add_details(coach, DETAILS) == first  # без дублей
+    assert [d.id for d in await services.game_payments.details_of(coach.user.id)] == [
+        first.id,
+        second.id,
+    ]
+    renamed = DETAILS.model_copy(update={"bank": "Сбер"})
+    updated = await services.game_payments.update_details(coach, first.id, renamed)
+    assert updated.id == first.id and updated.bank == "Сбер"
+    await services.game_payments.delete_details(coach, second.id)
+    assert [d.bank for d in await services.game_payments.details_of(coach.user.id)] == ["Сбер"]
+    with pytest.raises(NotFound):  # чужие реквизиты не изменить: id ищется только у себя
+        await services.game_payments.delete_details(await ctx_of(services, CAPTAIN), first.id)
+    for n in range(4):
+        await services.game_payments.add_details(
+            coach, PaymentDetails(method=PaymentMethod.PHONE, value=f"+7999000000{n}", bank="Банк")
+        )
+    with pytest.raises(Conflict):  # больше пяти — нельзя
+        await services.game_payments.add_details(coach, card)
+
+
+async def test_admin_picks_one_of_coach_details(
+    services: Services, notifier: FakeNotifier, match_id: int
+) -> None:
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach = await ctx_of(services, COACH)
+    card = PaymentDetails(method=PaymentMethod.CARD, value="4111111111111111", bank="Т-Банк")
+    await services.game_payments.add_details(coach, DETAILS)
+    await services.game_payments.add_details(coach, card)
+    await services.game_payments.create(
+        admin, payment(match_id, None, coach.user.id).model_copy(update={"details": card}), now=NOW
+    )
+    post = notifier.to(CHAT_ID)[-1].text
+    assert "4111 1111 1111 1111" in post and "+79991234567" not in post
+
+
+async def test_all_players_paid_notifies_once(
+    services: Services, notifier: FakeNotifier, match_id: int
+) -> None:
+    """«Все» — ответившие «Буду (игрок)»: оба отметили «Оплатил» — тренеру-получателю
+    сообщение, один раз; болельщик не в счёт."""
+    coach = await ctx_of(services, COACH)
+    await services.game_payments.create(coach, payment(match_id, None, coach.user.id), now=NOW)
+    pay_poll = f"poll-{len(notifier.polls)}"
+    await services.polls.record_answer(pay_poll, 3, [PAID], now=NOW)  # болельщик
+    await services.polls.record_answer(pay_poll, 1, [PAID], now=NOW)
+    assert not any("Все игроки оплатили" in m.text for m in notifier.to(COACH))
+    await services.polls.record_answer(pay_poll, 2, [PAID], now=NOW)
+    paid = [m for m in notifier.to(COACH) if "Все игроки оплатили" in m.text]
+    assert len(paid) == 1 and "Оплатили 2 из 2" in paid[0].text
+    await services.polls.record_answer(pay_poll, 2, [PAID], now=NOW)  # повторный голос
+    assert len([m for m in notifier.to(COACH) if "Все игроки оплатили" in m.text]) == 1

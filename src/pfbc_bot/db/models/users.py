@@ -20,8 +20,9 @@ class User(IdMixin, CreatedAtMixin, Base):
     birth_date: Mapped[date | None]
     mtgame_url: Mapped[str | None] = mapped_column(String(500))
     phone: Mapped[str | None] = mapped_column(String(20))  # +79991234567, по желанию
-    # реквизиты для сбора денег (тренер): {"method": "phone"|"card", "value": ..., "bank": ...}
-    payment_details: Mapped[dict[str, Any] | None]
+    # реквизиты для сбора денег — список: [{"id", "method": "phone"|"card", "value", "bank"}];
+    # задаёт и меняет только сам пользователь
+    payment_details: Mapped[list[Any] | None]
     pd_consent_at: Mapped[datetime | None]
     guardian_consent: Mapped[bool] = mapped_column(default=False)
     is_admin: Mapped[bool] = mapped_column(default=False)

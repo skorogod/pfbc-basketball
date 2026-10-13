@@ -30,7 +30,8 @@ class AdminView:
     @property
     def profile_html(self) -> str:
         username = self.user.username if self.user else None
-        return profile_link(self.tg_user_id, username, self.display_name)
+        knows_bot = self.user.knows_bot if self.user else False
+        return profile_link(self.tg_user_id, username, self.display_name, knows_bot=knows_bot)
 
 
 class AdminService:

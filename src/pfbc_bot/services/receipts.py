@@ -283,6 +283,38 @@ class ReceiptService:
             missing=", ".join(profile(u) for u in payers.values() if u.id not in sent) or "—",
         )
 
+    async def notify_if_all_sent(self, request_id: int) -> bool:
+        """Все участники состава, кроме тренеров, отметили «Отправил» — тренерам в личку,
+        а если ни одному не дошло (или тренер не назначен) — в группу. Один раз на опрос.
+        True — оповещение отправлено сейчас."""
+        async with self._uow_factory() as uow:
+            request = await uow.receipts.get(request_id)
+            if request is None:
+                return False
+            payers, sent = await _payers_and_sent(uow, request)
+            if not payers or any(uid not in sent for uid in payers):
+                return False
+            if not await uow.system.claim_reminder(f"receipt_all:{request.id}", "receipt"):
+                return False
+            await uow.commit()
+            squad = await uow.squads.get(request.squad_id)
+            text = ru.RECEIPT_ALL_SENT.format(
+                month=month_title(request.month),
+                squad=squad.name if squad else "?",
+                count=len(payers),
+            )
+            delivered = [
+                await send_direct(self._notifier, coach, text)
+                for coach in await _coaches(uow, request.squad_id)
+            ]
+            if not any(delivered):
+                await send_to_squad(
+                    uow, self._notifier, request.squad_id, TopicPurpose.PAYMENTS, text
+                )
+            await uow.commit()  # dm_available
+        log.info("receipt_all_sent", request_id=request_id)
+        return True
+
     async def remind_due(self, *, now: datetime | None = None) -> int:
         """Срок прошёл: не отметившим «Отправил» — в личку (не дошло — в группу). Сколько раз
         и с каким интервалом — настройки состава, не в тихие часы. Каждое напоминание — один

@@ -152,6 +152,17 @@ ROLES_HEADER = "<b>Роли: {squad}</b>\nВыберите участника:"
 ROLES_EMPTY = "В составе пока нет участников."
 ROLE_CARD = "<b>{name}</b> — состав {squad}\nРоли: {roles}"
 ROLE_BTN = "{title}: {mark}"
+CARD_TELEGRAM = "Telegram: {username} (id <code>{tg_id}</code>)"
+CARD_NO_USERNAME = "без username"
+CARD_REGISTERED = "Регистрация: пройдена {date}"
+CARD_NOT_REGISTERED = "Регистрация: ⚠️ не пройдена — данных профиля нет"
+CARD_FIELD = "{title}: {value}"
+CARD_DM_OPEN = "Личка с ботом: открыта"
+CARD_DM_CLOSED = "Личка с ботом: ⚠️ закрыта — бот не может написать (нужен /start)"
+CARD_NO_LINK = (
+    "ℹ️ Ссылки на профиль нет: у пользователя нет username и он не писал боту — Telegram "
+    "в таком случае не даёт открыть профиль из лички. Написать ему можно из группы состава."
+)
 SETTINGS_USAGE = (
     "Использование: /set &lt;ключ&gt; &lt;значение&gt;, например "
     "<code>/set training_poll_time 08:30</code>. Текущие настройки: /settings"
@@ -465,6 +476,7 @@ RECEIPT_POST = (
     "в опросе ниже.\n⏰ До {deadline}"
 )
 RECEIPT_COACHES = ": {names}"
+RECEIPT_ALL_SENT = "✅ Все прислали квитанции за {month} ({squad}): {count} из {count}."
 RECEIPT_POLL_QUESTION = "🧾 Квитанция за {month}: отправили тренеру?"
 RECEIPT_REMINDER_DM = (
     "⏰ <b>Напоминание: квитанция за {month}</b> ({squad})\n"
@@ -496,6 +508,9 @@ GAME_PAYMENT_POST = (
     "Платят все, кто ответил «Буду (игрок)». После перевода отметьте «Оплатил» в опросе ниже."
 )
 GAME_PAYMENT_DEADLINE = "\n⏰ Оплатить до {when}"
+GAME_PAYMENT_ALL_PAID = (
+    "✅ Все игроки оплатили игру\n{event}\nОплатили {count} из {count} по {amount}: {names}"
+)
 GAME_PAYMENT_POLL_QUESTION = "💰 Оплата игры «{title}»: {amount}"
 GAME_PAYMENT_REMINDER_DM = (
     "💰 Напоминание об оплате игры\n{event}\n\n<b>Сумма: {amount}</b>\n{details}\n\n"
@@ -539,10 +554,11 @@ GAME_PAYMENT_BTN_NO_DEADLINE = "Без срока"
 GAME_PAYMENT_ASK_COLLECTOR = "Кто собирает деньги? Переводить будут на его реквизиты."
 GAME_PAYMENT_ME = " (я)"
 GAME_PAYMENT_COLLECTOR_DETAILS = (
-    "Реквизиты получателя {name}:\n{details}\n\nПроверьте — использовать их?"
+    "Ваши реквизиты:\n{details}\n\nПроверьте и выберите — или введите новые."
 )
 GAME_PAYMENT_COLLECTOR_NO_DETAILS = "У {name} нет сохранённых реквизитов — введите их."
 GAME_PAYMENT_BTN_USE = "✅ Использовать"
+GAME_PAYMENT_BTN_USE_N = "✅ {n}. {details}"
 GAME_PAYMENT_ASK_COLLECTOR_HINT = (
     "\nВ списке — вы и тренеры и админы состава, которые сами указали реквизиты в /profile."
 )
@@ -587,3 +603,14 @@ DETAILS_BTN_MY_PHONE = "Телефон из профиля: {phone}"
 DETAILS_ASK_CARD = "Номер карты, например <code>2202 2000 1234 5678</code>:"
 DETAILS_ASK_BANK = "Банк, например <code>Сбербанк</code> или <code>Т-Банк</code>:"
 DETAILS_SAVED = "✅ Реквизиты сохранены:\n{details}"
+DETAILS_MINE = "<b>Ваши реквизиты для сбора денег</b>\n{details}"
+DETAILS_EMPTY = "Пока нет — добавьте, чтобы вас можно было выбрать получателем сбора."
+DETAILS_BTN_ADD = "➕ Добавить реквизиты"
+DETAILS_BTN_EDIT = "✏️ Изменить {n}"
+DETAILS_BTN_DELETE = "🗑 Удалить {n}"
+DETAILS_EDITING = "Изменяем реквизиты:\n{details}\n\nВведите новые."
+DETAILS_CONFIRM_DELETE = "Удалить реквизиты?\n{details}"
+DETAILS_BTN_CONFIRM_DELETE = "Да, удалить"
+DETAILS_DELETED = "Реквизиты удалены."
+DETAILS_LIMIT = "Можно сохранить не больше {limit} реквизитов — удалите ненужные в /profile."
+DETAILS_NOT_FOUND = "Реквизиты не найдены — возможно, их уже удалили."

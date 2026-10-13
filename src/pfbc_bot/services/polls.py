@@ -22,9 +22,11 @@ from pfbc_bot.services.common import resolve_destination, squad_tz, to_dto
 from pfbc_bot.services.duty import DutyService
 from pfbc_bot.services.errors import Conflict, NotFound
 from pfbc_bot.services.events import EVENT_POLLS, EVENT_REF, to_dtos
+from pfbc_bot.services.game_payments import GamePaymentService
 from pfbc_bot.services.membership import MembershipService
 from pfbc_bot.services.permissions import require
 from pfbc_bot.services.ports import Notifier, SentPoll
+from pfbc_bot.services.receipts import ReceiptService
 from pfbc_bot.services.settings import load_squad_settings
 from pfbc_bot.texts import ru
 
@@ -61,11 +63,15 @@ class PollService:
         notifier: Notifier,
         duty: DutyService,
         membership: MembershipService,
+        game_payments: GamePaymentService,
+        receipts: ReceiptService,
     ) -> None:
         self._uow_factory = uow_factory
         self._notifier = notifier
         self._duty = duty
         self._membership = membership
+        self._game_payments = game_payments
+        self._receipts = receipts
 
     async def publish_training_polls(self, *, now: datetime | None = None) -> int:
         """Публикует опрос в день тренировки в training_poll_time (по времени состава), а на
@@ -267,6 +273,13 @@ class PollService:
             await uow.commit()
             poll_type, ref_id, user_id = poll.type, poll.ref_id, user.id
             superseded = poll.superseded_at is not None
+
+        # все отметились: «Оплатил» — все игроки матча, «Отправил» — все, кроме тренеров
+        if ref_id is not None and not superseded:
+            if poll_type == PollType.GAME_PAYMENT:
+                await self._game_payments.notify_if_all_paid(ref_id, now=now)
+            elif poll_type == PollType.RECEIPT:
+                await self._receipts.notify_if_all_sent(ref_id)
 
         declined = bool(option_ids) and TRAINING_POLL_YES not in option_ids
         # ответ в устаревшем опросе (тренировку перенесли) на дежурства не влияет

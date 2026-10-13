@@ -269,16 +269,14 @@ async def test_not_notified_duty_marked_for_captain(
     await services.duty.assign_due(now=at(16))
     summary = notifier.to(CAPTAIN)[-1].text
     lines = {line for line in summary.splitlines() if line.startswith("•")}
-    assert f'• <a href="tg://user?id=3">user3</a>{ru.DUTY_NOT_NOTIFIED_MARK}' in lines
+    # user3 боту не писал (личка закрыта) — ссылки на него нет, только имя с пометкой
+    assert f"• user3 (не в боте){ru.DUTY_NOT_NOTIFIED_MARK}" in lines
     assert '• <a href="tg://user?id=2">user2</a>' in lines  # личное дошло — пометки нет
 
     # замена тоже не дошла до нового дежурного — капитан предупреждён
     notifier.blocked_dm.add(1)
     await services.polls.record_answer("poll-1", 2, [NO], now=at(16, 30))
-    assert (
-        '<a href="tg://user?id=1">user1</a> не получил(а) уведомление'
-        in notifier.to(CAPTAIN)[-1].text
-    )
+    assert "user1 (не в боте) не получил(а) уведомление" in notifier.to(CAPTAIN)[-1].text
 
 
 async def test_manager_prompts_list_assigned_duties(
@@ -647,8 +645,8 @@ async def test_duty_messages_link_people(
     captain = await ctx_of(services, CAPTAIN)
     prompt = await services.duty.confirm_replace(captain, assignment_3, now=at(16, 10))
     assert '<a href="tg://user?id=3">user3</a>' in prompt.text  # кого заменить
-    assert '<a href="tg://user?id=1">user1</a>' in prompt.text  # следующий по очереди
+    assert "user1 (не в боте)" in prompt.text  # следующий по очереди (боту не писал)
     await services.duty.replace(captain, assignment_3, now=at(16, 11))
     group = [m.text for m in notifier.to(CHAT_ID) if "Замена дежурного" in m.text][-1]
     assert '<a href="tg://user?id=3">user3</a> → <a href="tg://user?id=1">user1</a>' in group
-    assert '<a href="tg://user?id=1">user1</a>' in notifier.to(3)[-1].text  # кто заменил
+    assert "user1" in notifier.to(3)[-1].text  # кто заменил

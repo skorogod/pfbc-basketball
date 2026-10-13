@@ -39,6 +39,7 @@ from pfbc_bot.bot.keyboards.common import Choice, ItemAction, SquadPick
 from pfbc_bot.bot.middlewares.access import to_telegram_user
 from pfbc_bot.bot.routers.admin import AdminAction, RoleAction
 from pfbc_bot.bot.routers.events import TournamentLink
+from pfbc_bot.bot.routers.game_payments import DetailsAction
 from pfbc_bot.bot.routers.permissions import PermAction
 from pfbc_bot.domain.dates import local_to_utc
 from pfbc_bot.domain.enums import SquadRole, TrainingStatus
@@ -234,8 +235,10 @@ async def test_roles_invite_and_settings_in_private_chat(
     await harness.press(ADMIN_TG_ID, members_btn)
     listing = harness.session.texts_to(ADMIN_TG_ID)[-1]
     assert listing.startswith("<b>Участники состава Взрослые</b> — 3:")
-    assert "\n1. " in listing and "user100</a> — тренер · ⚠️ не зарегистрирован(а)" in listing
-    assert "user999</a> — админ" in listing and "user2</a> — ⚠️" in listing
+    assert (
+        "\n1. " in listing and "user100 (не в боте) — тренер · ⚠️ не зарегистрирован(а)" in listing
+    )
+    assert "user999</a> — админ" in listing and "user2 (не в боте) — ⚠️" in listing
     await harness.press(PLAYER, members_btn)
     assert harness.session.texts_to(PLAYER) == []
 
@@ -247,7 +250,7 @@ async def test_roles_invite_and_settings_in_private_chat(
     await harness.press(ADMIN_TG_ID, AdminAction(action="grant", user_id=coach_id).pack())
     assert (await ctx_of(services, COACH)).is_admin
     assert ru.ADMIN_GRANTED.format(
-        name='<a href="tg://user?id=100">user100</a>'
+        name="user100 (не в боте)"  # назначен до того, как написал боту: ссылки нет
     ) in harness.session.texts_to(ADMIN_TG_ID)
     await harness.press(ADMIN_TG_ID, AdminAction(action="revoke", user_id=coach_id).pack())
     assert not (await ctx_of(services, COACH)).is_admin
@@ -713,13 +716,13 @@ async def test_game_pay_with_suggested_amount_and_new_details(
     await harness.press(COACH, Choice(flow="pd_phone", value="mine").pack())
     await harness.private(COACH, "Сбербанк")
     preview = harness.session.texts_to(COACH)[-1]
-    assert "Сумма: 7 500 ₽" in preview and "+7 999 123-45-67" in preview and "Кубок" in preview
+    assert "Сумма: 7 500 ₽" in preview and "+79991234567" in preview and "Кубок" in preview
     await harness.press(COACH, Choice(flow="gp_pub", value="yes").pack())
 
     assert notifier.polls[-1][1] == "💰 Оплата игры «Финал»: 7 500 ₽"
     assert "Сумма: 7 500 ₽" in notifier.to(GROUP_ID)[-1].text
-    saved = await services.game_payments.saved_details(coach.user.id)
-    assert saved is not None and saved.value == "+79991234567" and saved.bank == "Сбербанк"
+    [saved] = await services.game_payments.details_of(coach.user.id)
+    assert saved.value == "+79991234567" and saved.bank == "Сбербанк"
 
 
 async def test_permissions_admin_toggles_role(
@@ -819,7 +822,7 @@ async def test_payment_block_only_for_coach(
             notify_group=True,
         ),
     )
-    await services.game_payments.save_details(
+    await services.game_payments.add_details(
         coach, PaymentDetails(method=PaymentMethod.PHONE, value="+79991234567", bank="Сбер")
     )
     await services.game_payments.create(
@@ -932,3 +935,56 @@ async def test_receipts_command_publishes_once_a_month(
     assert notifier.stopped_polls
     await harness.private(COACH, "/receipts")
     assert harness.session.texts_to(COACH)[-1].endswith(ru.PAYMENT_CLOSED_MARK)
+
+
+async def test_profile_details_add_edit_delete(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """/profile → Реквизиты: добавить, изменить, удалить (с подтверждением)."""
+    await bind(harness)
+    await harness.member(COACH, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach = await ctx_of(services, COACH)
+    await services.squads.set_role(admin, squad.id, coach.user.id, SquadRole.COACH, grant=True)
+
+    await harness.private(COACH, "/profile")
+    await harness.press(COACH, Choice(flow="profile", value="payment").pack())
+    assert ru.DETAILS_EMPTY in harness.session.texts_to(COACH)[-1]
+    await harness.press(COACH, DetailsAction(action="add").pack())
+    await harness.press(COACH, Choice(flow="pd_method", value="card").pack())
+    await harness.private(COACH, "4111 1111 1111 1111")
+    await harness.private(COACH, "Т-Банк")
+    [card] = await services.game_payments.details_of(coach.user.id)
+    assert card.bank == "Т-Банк"
+
+    await harness.press(COACH, DetailsAction(action="edit", details_id=card.id).pack())
+    await harness.press(COACH, Choice(flow="pd_method", value="phone").pack())
+    await harness.private(COACH, "8 999 123 45 67")
+    await harness.private(COACH, "Сбер")
+    [edited] = await services.game_payments.details_of(coach.user.id)
+    assert edited.id == card.id and edited.value == "+79991234567"
+    assert "+79991234567" in harness.session.texts_to(COACH)[-1]  # телефон — слитно
+
+    await harness.press(COACH, DetailsAction(action="del", details_id=card.id).pack())
+    assert await services.game_payments.details_of(coach.user.id) != []  # только вопрос
+    await harness.press(COACH, DetailsAction(action="delok", details_id=card.id).pack())
+    assert await services.game_payments.details_of(coach.user.id) == []
+
+
+async def test_admin_sees_member_details(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    await bind(harness)
+    await harness.member(PLAYER, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    player = await ctx_of(services, PLAYER)
+    await services.registration.update_field(player.user.id, "phone", "8 999 765 43 21")
+    await harness.press(
+        ADMIN_TG_ID, RoleAction(squad_id=squad.id, user_id=player.user.id, action="open").pack()
+    )
+    card = harness.session.texts_to(ADMIN_TG_ID)[-1]
+    assert "Телефон: +79997654321" in card and "Регистрация: ⚠️ не пройдена" in card
+    assert ru.CARD_NO_LINK in card  # без username и не писал боту — объясняем, почему без ссылки

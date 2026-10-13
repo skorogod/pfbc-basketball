@@ -45,6 +45,6 @@ def test_amount() -> None:
 def test_payment_details_text() -> None:
     phone = PaymentDetails(method=PaymentMethod.PHONE, value="89991234567", bank=" Сбербанк ")
     assert phone.value == "+79991234567"
-    assert phone.text == "📱 По номеру телефона: <code>+7 999 123-45-67</code> (Сбербанк)"
+    assert phone.text == "📱 По номеру телефона: +79991234567 (Сбербанк)"  # Telegram подсветит
     card = PaymentDetails(method=PaymentMethod.CARD, value="4111111111111111", bank="Т-Банк")
     assert card.text == "💳 Карта: <code>4111 1111 1111 1111</code> (Т-Банк)"

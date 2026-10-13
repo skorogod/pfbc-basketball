@@ -45,6 +45,8 @@ def build_services(
     admin_ids = frozenset(admin_tg_ids)
     recipients = Recipients(admin_ids)
     duty = DutyService(uow_factory, notifier, recipients)
+    game_payments = GamePaymentService(uow_factory, notifier, recipients)
+    receipts = ReceiptService(uow_factory, notifier)
     membership = MembershipService(uow_factory, notifier, admin_ids, duty=duty)
     return Services(
         access=AccessService(uow_factory, admin_ids),
@@ -55,10 +57,10 @@ def build_services(
         settings=SettingsService(uow_factory),
         trainings=TrainingService(uow_factory, notifier),
         duty=duty,
-        polls=PollService(uow_factory, notifier, duty, membership),
+        polls=PollService(uow_factory, notifier, duty, membership, game_payments, receipts),
         birthdays=BirthdayService(uow_factory, notifier),
         events=EventService(uow_factory, notifier, recipients),
-        game_payments=GamePaymentService(uow_factory, notifier, recipients),
-        receipts=ReceiptService(uow_factory, notifier),
+        game_payments=game_payments,
+        receipts=receipts,
         permissions=PermissionService(uow_factory),
     )

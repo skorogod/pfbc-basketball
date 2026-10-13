@@ -270,11 +270,36 @@ async def on_role_action(
 
 
 def _role_card(view: SquadMemberView, squad: SquadDTO) -> str:
-    return ru.ROLE_CARD.format(
-        name=view.user.profile_html,
-        squad=html.escape(squad.name),
-        roles=_roles_text(view.roles) or ROLE_TITLES[SquadRole.PLAYER],
-    )
+    """Карточка участника для админа: роли и все данные профиля."""
+    user = view.user
+    lines = [
+        ru.ROLE_CARD.format(
+            name=user.profile_html,
+            squad=html.escape(squad.name),
+            roles=_roles_text(view.roles) or ROLE_TITLES[SquadRole.PLAYER],
+        ),
+        ru.CARD_TELEGRAM.format(
+            username=f"@{html.escape(user.username)}" if user.username else ru.CARD_NO_USERNAME,
+            tg_id=user.tg_user_id,
+        ),
+        ru.CARD_REGISTERED.format(date=f"{user.pd_consent_at:%d.%m.%Y}")
+        if user.pd_consent_at
+        else ru.CARD_NOT_REGISTERED,
+        ru.CARD_FIELD.format(title="ФИО", value=html.escape(user.full_name or ru.NOT_SET)),
+        ru.CARD_FIELD.format(title="Телефон", value=user.phone or ru.NOT_SET),
+        ru.CARD_FIELD.format(
+            title="Дата рождения",
+            value=f"{user.birth_date:%d.%m.%Y}" if user.birth_date else ru.NOT_SET,
+        ),
+        ru.CARD_FIELD.format(title="mtgame", value=html.escape(user.mtgame_url or ru.NOT_SET)),
+        ru.CARD_FIELD.format(
+            title="В составе с", value=f"{view.membership.first_joined_at:%d.%m.%Y}"
+        ),
+        ru.CARD_DM_OPEN if user.dm_available else ru.CARD_DM_CLOSED,
+    ]
+    if not user.username and not user.knows_bot:
+        lines.append(ru.CARD_NO_LINK)
+    return "\n".join(lines)
 
 
 def _role_keyboard(view: SquadMemberView, squad: SquadDTO) -> InlineKeyboardMarkup:

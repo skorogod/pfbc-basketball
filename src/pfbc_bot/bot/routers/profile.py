@@ -10,12 +10,11 @@ from aiogram.types import CallbackQuery, Message
 
 from pfbc_bot.bot.helpers import callback_message, dismiss
 from pfbc_bot.bot.keyboards.common import Choice, choices_keyboard
-from pfbc_bot.bot.routers.game_payments import PURPOSE_PROFILE, start_details_input
+from pfbc_bot.bot.routers.game_payments import show_my_details
 from pfbc_bot.bot.states import ProfileEdit
 from pfbc_bot.domain.enums import SquadRole
-from pfbc_bot.domain.payments import format_phone
 from pfbc_bot.domain.permissions import Permission
-from pfbc_bot.schemas.payments import PaymentDetails
+from pfbc_bot.schemas.payments import parse_details_list
 from pfbc_bot.schemas.squads import UserContext
 from pfbc_bot.services.container import Services
 from pfbc_bot.services.registration import EDITABLE_FIELDS, Profile
@@ -52,17 +51,14 @@ def render_profile(profile: Profile, *, with_payment: bool = False) -> str:
     user = profile.user
     payment = ""
     if with_payment:
-        details = (
-            PaymentDetails.model_validate(user.payment_details).text
-            if user.payment_details
-            else ru.NOT_SET
-        )
+        saved = parse_details_list(user.payment_details)
+        details = "".join(f"\n  {d.text}" for d in saved) or ru.NOT_SET
         payment = ru.PROFILE_PAYMENT.format(details=details)
     return ru.PROFILE.format(
         full_name=html.escape(user.full_name or ru.NOT_SET),
         birth_date=user.birth_date.strftime("%d.%m.%Y") if user.birth_date else ru.NOT_SET,
         mtgame=html.escape(user.mtgame_url or ru.NOT_SET),
-        phone=format_phone(user.phone) if user.phone else ru.NOT_SET,
+        phone=user.phone or ru.NOT_SET,  # слитно — Telegram подсвечивает номер
         squads=html.escape(", ".join(s.name for s in profile.squads) or ru.NOT_SET),
         payment=payment,
     )
@@ -98,7 +94,7 @@ async def on_edit_field(
         return
     if callback_data.value == PAYMENT and is_coach(ctx):
         await state.clear()
-        await start_details_input(message, state, PURPOSE_PROFILE, phone=ctx.user.phone)
+        await show_my_details(message, ctx, services)
         return
     if callback_data.value not in EDITABLE_FIELDS:
         return

@@ -42,6 +42,10 @@ def _group_message_chat(event: TelegramObject) -> int | None:
     return None
 
 
+def _is_private_message(event: TelegramObject) -> bool:
+    return isinstance(event, Message) and event.chat.type == ChatType.PRIVATE
+
+
 def _is_private_start(event: TelegramObject) -> bool:
     return (
         isinstance(event, Message)
@@ -79,6 +83,12 @@ class AccessMiddleware(BaseMiddleware):
         if ctx is None or not ctx.is_allowed:
             await self._deny(event, tg_user.id)
             return None
+        if not ctx.user.dm_available and _is_private_message(event):
+            # написал боту в личку — значит, бот может ему писать, а ссылка на него работает
+            await services.registration.mark_dm_available(tg_user.id)
+            ctx = ctx.model_copy(
+                update={"user": ctx.user.model_copy(update={"dm_available": True})}
+            )
         data["ctx"] = ctx
         return await handler(event, data)
 

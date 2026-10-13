@@ -13,6 +13,7 @@ from decimal import Decimal
 from aiogram import F, Router
 from aiogram.enums import ChatType
 from aiogram.filters import Command
+from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -27,9 +28,14 @@ from pfbc_bot.bot.keyboards.common import (
 )
 from pfbc_bot.bot.states import GamePaymentCreation, PaymentDetailsInput
 from pfbc_bot.domain.dates import format_local, localize, parse_local_datetime, to_local, utcnow
-from pfbc_bot.domain.payments import format_amount, format_phone, parse_amount
+from pfbc_bot.domain.payments import format_amount, parse_amount
 from pfbc_bot.domain.permissions import Permission
-from pfbc_bot.schemas.payments import GamePaymentCreate, PaymentDetails, PaymentMethod
+from pfbc_bot.schemas.payments import (
+    MAX_DETAILS,
+    GamePaymentCreate,
+    PaymentDetails,
+    PaymentMethod,
+)
 from pfbc_bot.schemas.squads import SquadDTO, UserContext
 from pfbc_bot.schemas.users import UserDTO
 from pfbc_bot.services.container import Services
@@ -270,31 +276,35 @@ async def _ask_details(
     state: FSMContext,
     collector: UserDTO,
 ) -> None:
-    """Реквизиты получателя показываются полностью — проверить. Свои — использовать или ввести
-    новые (нет — сразу ввод); чужие задаёт только их владелец — только «Использовать»."""
-    saved = await services.game_payments.saved_details(collector.id)
+    """Реквизиты получателя показываются полностью — проверить и выбрать. Свои — ещё и
+    «Ввести новые» (нет сохранённых — сразу ввод); чужие задаёт только их владелец."""
+    saved = await services.game_payments.details_of(collector.id)
+    mine = collector.id == ctx.user.id
     name = collector.profile_html
-    if collector.id != ctx.user.id and saved is not None:
-        await state.set_state(GamePaymentCreation.details)
-        await state.update_data(saved_details=saved.model_dump(mode="json"))
-        await message.answer(
-            ru.GAME_PAYMENT_OTHER_DETAILS.format(name=name, details=saved.text),
-            reply_markup=choices_keyboard(DETAILS_FLOW, [("saved", ru.GAME_PAYMENT_BTN_USE)]),
-        )
-        return
-    if saved is None:
+    if not saved:
         await message.answer(ru.GAME_PAYMENT_COLLECTOR_NO_DETAILS.format(name=name))
         await start_details_input(message, state, PURPOSE_GAME, phone=collector.phone)
         return
     await state.set_state(GamePaymentCreation.details)
-    await state.update_data(saved_details=saved.model_dump(mode="json"), phone_hint=collector.phone)
+    await state.update_data(
+        saved_details=[d.model_dump(mode="json") for d in saved], phone_hint=collector.phone
+    )
+    numbered = "\n".join(f"{n}. {d.text}" for n, d in enumerate(saved, 1))
+    template = ru.GAME_PAYMENT_COLLECTOR_DETAILS if mine else ru.GAME_PAYMENT_OTHER_DETAILS
+    options = [
+        (
+            d.id,
+            ru.GAME_PAYMENT_BTN_USE_N.format(n=n, details=d.short)
+            if len(saved) > 1
+            else ru.GAME_PAYMENT_BTN_USE,
+        )
+        for n, d in enumerate(saved, 1)
+    ]
+    if mine:
+        options.append(("new", ru.GAME_PAYMENT_BTN_NEW_DETAILS))
     await message.answer(
-        ru.GAME_PAYMENT_COLLECTOR_DETAILS.format(name=name, details=saved.text),
-        reply_markup=choices_keyboard(
-            DETAILS_FLOW,
-            [("saved", ru.GAME_PAYMENT_BTN_USE), ("new", ru.GAME_PAYMENT_BTN_NEW_DETAILS)],
-            width=1,
-        ),
+        template.format(name=name, details=numbered),
+        reply_markup=choices_keyboard(DETAILS_FLOW, options, width=1),
     )
 
 
@@ -310,22 +320,110 @@ async def on_details_choice(
     message = callback_message(callback)
     if message is None:
         return
-    await message.edit_reply_markup(reply_markup=None)
     data = await state.get_data()
-    if callback_data.value == "new" and data.get("collector_id") == ctx.user.id:
+    if callback_data.value == "new":
+        if data.get("collector_id") != ctx.user.id:  # чужие реквизиты не вводятся
+            return
+        await message.edit_reply_markup(reply_markup=None)
         await start_details_input(message, state, PURPOSE_GAME, phone=data.get("phone_hint"))
         return
-    await state.update_data(details=data["saved_details"])
+    chosen = next((d for d in data["saved_details"] if d["id"] == callback_data.value), None)
+    if chosen is None:
+        return
+    await message.edit_reply_markup(reply_markup=None)
+    await state.update_data(details=chosen)
     await _preview(message, ctx, services, state)
+
+
+# --- мои реквизиты (из /profile): список, добавить, изменить, удалить ---
+class DetailsAction(CallbackData, prefix="pd"):
+    action: str  # add | edit | del | delok | no
+    details_id: str = ""
+
+
+async def show_my_details(message: Message, ctx: UserContext, services: Services) -> None:
+    saved = await services.game_payments.details_of(ctx.user.id)
+    builder = InlineKeyboardBuilder()
+    for n, d in enumerate(saved, 1):
+        builder.button(
+            text=ru.DETAILS_BTN_EDIT.format(n=n),
+            callback_data=DetailsAction(action="edit", details_id=d.id),
+        )
+        builder.button(
+            text=ru.DETAILS_BTN_DELETE.format(n=n),
+            callback_data=DetailsAction(action="del", details_id=d.id),
+        )
+    if len(saved) < MAX_DETAILS:
+        builder.button(text=ru.DETAILS_BTN_ADD, callback_data=DetailsAction(action="add"))
+    builder.adjust(*([2] * len(saved)), 1)
+    lines = "\n".join(f"{n}. {d.text}" for n, d in enumerate(saved, 1)) or ru.DETAILS_EMPTY
+    await message.answer(ru.DETAILS_MINE.format(details=lines), reply_markup=builder.as_markup())
+
+
+@router.callback_query(DetailsAction.filter())
+async def on_details_action(
+    callback: CallbackQuery,
+    callback_data: DetailsAction,
+    ctx: UserContext,
+    services: Services,
+    state: FSMContext,
+) -> None:
+    message = callback_message(callback)
+    action, details_id = callback_data.action, callback_data.details_id
+    if action == "delok":  # шаг 2: подтверждено
+        await services.game_payments.delete_details(ctx, details_id)
+        await callback.answer(ru.DETAILS_DELETED)
+        if message:
+            await message.edit_text(ru.DETAILS_DELETED, reply_markup=None)
+            await show_my_details(message, ctx, services)
+        return
+    await callback.answer()
+    if message is None:
+        return
+    if action == "no":
+        await dismiss(message)
+        return
+    if action == "add":
+        await state.clear()
+        await start_details_input(message, state, PURPOSE_PROFILE, phone=ctx.user.phone)
+        return
+    saved = await services.game_payments.details_of(ctx.user.id)
+    details = next((d for d in saved if d.id == details_id), None)
+    if details is None:
+        await message.answer(ru.DETAILS_NOT_FOUND)
+        return
+    if action == "edit":
+        await state.clear()
+        await message.answer(ru.DETAILS_EDITING.format(details=details.text))
+        await start_details_input(
+            message, state, PURPOSE_PROFILE, phone=ctx.user.phone, details_id=details.id
+        )
+    elif action == "del":  # шаг 1: вопрос — ничего не меняет
+        builder = InlineKeyboardBuilder()
+        builder.button(
+            text=ru.DETAILS_BTN_CONFIRM_DELETE,
+            callback_data=DetailsAction(action="delok", details_id=details.id),
+        )
+        builder.button(text=ru.BTN_CANCEL, callback_data=DetailsAction(action="no"))
+        builder.adjust(2)
+        await message.answer(
+            ru.DETAILS_CONFIRM_DELETE.format(details=details.text),
+            reply_markup=builder.as_markup(),
+        )
 
 
 # --- ввод реквизитов (и для сбора, и из /profile) ---
 async def start_details_input(
-    message: Message, state: FSMContext, purpose: str, *, phone: str | None
+    message: Message,
+    state: FSMContext,
+    purpose: str,
+    *,
+    phone: str | None,
+    details_id: str | None = None,
 ) -> None:
-    """phone — телефон того, чьи реквизиты вводим: предлагается кнопкой."""
+    """phone — свой телефон из профиля: предлагается кнопкой; details_id — изменяем эти."""
     await state.set_state(PaymentDetailsInput.method)
-    await state.update_data(details_purpose=purpose, phone_hint=phone)
+    await state.update_data(details_purpose=purpose, phone_hint=phone, details_id=details_id)
     await message.answer(
         ru.DETAILS_ASK_METHOD,
         reply_markup=choices_keyboard(
@@ -357,7 +455,7 @@ async def on_method(callback: CallbackQuery, callback_data: Choice, state: FSMCo
     markup = None
     if phone:
         markup = choices_keyboard(
-            MY_PHONE_FLOW, [("mine", ru.DETAILS_BTN_MY_PHONE.format(phone=format_phone(phone)))]
+            MY_PHONE_FLOW, [("mine", ru.DETAILS_BTN_MY_PHONE.format(phone=phone))]
         )
     await message.answer(ru.DETAILS_ASK_PHONE, reply_markup=markup)
 
@@ -403,9 +501,13 @@ async def on_bank(
         await message.answer(_first_error(exc))
         return
     if data.get("details_purpose") == PURPOSE_PROFILE:
-        await services.game_payments.save_details(ctx, details)
         await state.clear()
+        if data.get("details_id"):
+            await services.game_payments.update_details(ctx, str(data["details_id"]), details)
+        else:
+            await services.game_payments.add_details(ctx, details)
         await message.answer(ru.DETAILS_SAVED.format(details=details.text))
+        await show_my_details(message, ctx, services)
         return
     await state.update_data(details=details.model_dump(mode="json"))
     await _preview(message, ctx, services, state)

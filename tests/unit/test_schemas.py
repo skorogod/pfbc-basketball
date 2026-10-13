@@ -135,3 +135,5 @@ def test_profile_link_prefers_username() -> None:
         '<a href="https://t.me/ivan_pfbc">Иван &lt;И&gt;</a>'
     )
     assert profile_link(5, None, "Иван") == '<a href="tg://user?id=5">Иван</a>'
+    # нет username и не писал боту — Telegram не подсветит ссылку: имя с пометкой
+    assert profile_link(5, None, "Иван", knows_bot=False) == "Иван (не в боте)"

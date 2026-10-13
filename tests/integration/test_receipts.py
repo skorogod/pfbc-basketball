@@ -183,3 +183,29 @@ async def test_closed_receipt_poll_stops_reminders(
     assert await services.receipts.remind_due(now=at(2, 10)) == 0
     # завершённый сбор месяц не освобождает — по расписанию опрос не публикуется
     assert await services.receipts.publish_due(now=at(1, 10)) == 0
+
+
+async def test_all_sent_notifies_coach_once(
+    services: Services, notifier: FakeNotifier, squad_id: int
+) -> None:
+    """«Все» — участники состава, кроме тренеров (капитан — тоже): когда все отметили
+    «Отправил», тренеру в личку — один раз."""
+    await services.receipts.publish_due(now=at(1, 10))
+    for tg_id in (1, 2, 3):
+        await services.polls.record_answer("poll-1", tg_id, [SENT], now=at(1, 11))
+    assert not any("Все прислали" in m.text for m in notifier.to(COACH))  # капитан ещё нет
+    await services.polls.record_answer("poll-1", CAPTAIN, [SENT], now=at(1, 12))
+    done = [m for m in notifier.to(COACH) if "Все прислали" in m.text]
+    assert len(done) == 1 and "ноябрь 2026" in done[0].text and "4 из 4" in done[0].text
+    await services.polls.record_answer("poll-1", CAPTAIN, [SENT], now=at(1, 13))  # повтор
+    assert len([m for m in notifier.to(COACH) if "Все прислали" in m.text]) == 1
+
+
+async def test_all_sent_goes_to_group_when_coach_dm_closed(
+    services: Services, notifier: FakeNotifier, squad_id: int
+) -> None:
+    await services.receipts.publish_due(now=at(1, 10))
+    notifier.blocked_dm = {COACH}
+    for tg_id in (1, 2, 3, CAPTAIN):
+        await services.polls.record_answer("poll-1", tg_id, [SENT], now=at(1, 11))
+    assert "Все прислали квитанции за ноябрь 2026" in notifier.to(CHAT_ID)[-1].text

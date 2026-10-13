@@ -29,7 +29,13 @@ from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.logging import get_logger
 from pfbc_bot.repositories.uow import UnitOfWork, UowFactory
 from pfbc_bot.schemas.events import EventDTO
-from pfbc_bot.schemas.payments import GamePaymentCreate, GamePaymentDTO, PaymentDetails
+from pfbc_bot.schemas.payments import (
+    MAX_DETAILS,
+    GamePaymentCreate,
+    GamePaymentDTO,
+    PaymentDetails,
+    parse_details_list,
+)
 from pfbc_bot.schemas.settings import MAX_PAYMENT_REMINDER_INTERVAL_HOURS, MAX_PAYMENT_REMINDERS
 from pfbc_bot.schemas.squads import UserContext
 from pfbc_bot.schemas.users import UserDTO
@@ -146,12 +152,14 @@ class GamePaymentService:
     def _details_for(
         actor: UserContext, collector: User, data: GamePaymentCreate
     ) -> PaymentDetails:
-        """Реквизиты сбора. Свои — какие ввёл; чужие — только сохранённые им самим."""
+        """Реквизиты сбора. Свои — какие ввёл; чужие — только одни из сохранённых им самим
+        (подменить их, передав другие, нельзя)."""
         if collector.id == actor.user.id:
             return data.details
-        if not collector.payment_details:
-            raise Conflict(ru.GAME_PAYMENT_COLLECTOR_NOT_ALLOWED)
-        return PaymentDetails.model_validate(collector.payment_details)
+        for saved in parse_details_list(collector.payment_details):
+            if saved.same_as(data.details):
+                return saved
+        raise Conflict(ru.GAME_PAYMENT_COLLECTOR_NOT_ALLOWED)
 
     async def default_deadline(
         self, actor: UserContext, squad_id: int, *, now: datetime | None = None
@@ -252,10 +260,10 @@ class GamePaymentService:
                     closes_at=None,  # «Оплатил» можно отметить и после срока
                 )
             )
-            if collector.id == actor.user.id:  # свои реквизиты — запоминаем; чужие не трогаем
+            if collector.id == actor.user.id:  # свои новые реквизиты — запоминаем; чужие не трогаем
                 me = await uow.users.get(actor.user.id)
                 if me is not None:
-                    me.payment_details = details.model_dump(mode="json")
+                    _remember(me, details)
             await uow.system.audit(
                 actor_user_id=actor.user.id,
                 action="game_payment.create",
@@ -320,21 +328,98 @@ class GamePaymentService:
             await uow.polls.supersede(poll, now)
         return poll
 
-    async def saved_details(self, user_id: int) -> PaymentDetails | None:
+    # --- реквизиты: задаёт, меняет и удаляет только сам пользователь ---
+    async def details_of(self, user_id: int) -> list[PaymentDetails]:
+        """Сохранённые реквизиты пользователя (для показа и выбора; не для изменения)."""
         async with self._uow_factory() as uow:
             user = await uow.users.get(user_id)
-            if user is None or not user.payment_details:
-                return None
-            return PaymentDetails.model_validate(user.payment_details)
+            return parse_details_list(user.payment_details) if user else []
 
-    async def save_details(self, actor: UserContext, details: PaymentDetails) -> None:
-        """Свои реквизиты — задать или изменить их может только сам пользователь."""
+    async def add_details(self, actor: UserContext, details: PaymentDetails) -> PaymentDetails:
+        """Добавляет свои реквизиты (такие же уже есть — возвращает их)."""
         async with self._uow_factory() as uow:
-            user = await uow.users.get(actor.user.id)
-            if user is None:
-                raise NotFound("Пользователь не найден")
-            user.payment_details = details.model_dump(mode="json")
+            me = await self._me(uow, actor)
+            existing = parse_details_list(me.payment_details)
+            same = next((d for d in existing if d.same_as(details)), None)
+            if same is not None:
+                return same
+            if len(existing) >= MAX_DETAILS:
+                raise Conflict(ru.DETAILS_LIMIT.format(limit=MAX_DETAILS))
+            _store(me, [*existing, details])
             await uow.commit()
+            return details
+
+    async def update_details(
+        self, actor: UserContext, details_id: str, details: PaymentDetails
+    ) -> PaymentDetails:
+        async with self._uow_factory() as uow:
+            me = await self._me(uow, actor)
+            existing = parse_details_list(me.payment_details)
+            if not any(d.id == details_id for d in existing):
+                raise NotFound(ru.DETAILS_NOT_FOUND)
+            updated = details.model_copy(update={"id": details_id})
+            _store(me, [updated if d.id == details_id else d for d in existing])
+            await uow.commit()
+            return updated
+
+    async def delete_details(self, actor: UserContext, details_id: str) -> None:
+        async with self._uow_factory() as uow:
+            me = await self._me(uow, actor)
+            existing = parse_details_list(me.payment_details)
+            if not any(d.id == details_id for d in existing):
+                raise NotFound(ru.DETAILS_NOT_FOUND)
+            _store(me, [d for d in existing if d.id != details_id])
+            await uow.commit()
+
+    @staticmethod
+    async def _me(uow: UnitOfWork, actor: UserContext) -> User:
+        user = await uow.users.get(actor.user.id)
+        if user is None:
+            raise NotFound("Пользователь не найден")
+        return user
+
+    # --- все оплатили ---
+    async def notify_if_all_paid(self, payment_id: int, *, now: datetime | None = None) -> bool:
+        """Все ответившие «Буду (игрок)» отметили «Оплатил» — получателю денег и создателю
+        сбора сообщение (один раз на сбор). True — оповещение отправлено сейчас."""
+        async with self._uow_factory() as uow:
+            payment = await uow.game_payments.get(payment_id)
+            if payment is None or payment.cancelled_at is not None:
+                return False
+            match = await uow.events.get(payment.event_id)
+            if match is None:
+                return False
+            players, paid = await _players_and_paid(uow, payment)
+            if not players or any(uid not in paid for uid in players):
+                return False
+            key = f"game_payment_paid:{payment.id}"
+            if not await uow.system.claim_reminder(key, "game_payment"):
+                return False
+            await uow.commit()
+            tz = squad_tz(await uow.squads.get(payment.squad_id))
+            [event] = await to_dtos(uow, [match])
+            text = ru.GAME_PAYMENT_ALL_PAID.format(
+                event=_event_line(event, tz),
+                count=len(players),
+                amount=format_amount(payment.amount),
+                names=", ".join(profile(u) for u in players.values()),
+            )
+            await self._send_to_owners(uow, payment, text)
+            await uow.commit()  # dm_available
+        log.info("game_payment_all_paid", payment_id=payment_id)
+        return True
+
+    async def _send_to_owners(self, uow: UnitOfWork, payment: GamePayment, text: str) -> None:
+        """Получателю денег и создавшему сбор; не дошло никому — тем, кто собирает деньги."""
+        ids = {i for i in (payment.collector_user_id, payment.created_by_user_id) if i}
+        delivered = [
+            await send_direct(self._notifier, u, text)
+            for u in await uow.users.list_by_ids(sorted(ids))
+        ]
+        if not any(delivered):
+            await self._recipients.notify(
+                uow, self._notifier, payment.squad_id, Permission.GAME_PAYMENTS, text
+            )
 
     async def status(self, actor: UserContext, event_id: int) -> PaymentStatus | None:
         """Оплата игры для сводки: None — денег за эту игру не собирали."""
@@ -535,7 +620,18 @@ def format_payment_post(
     return ru.GAME_PAYMENT_POST.format(
         event=format_announcement(event, tz),
         amount=format_amount(amount),
-        collector=profile(collector),
+        collector=mention(collector),  # пост — в группе: упоминание работает всегда
         details=details.text,
         deadline=deadline,
     )
+
+
+def _store(user: User, details: list[PaymentDetails]) -> None:
+    user.payment_details = [d.model_dump(mode="json") for d in details] or None
+
+
+def _remember(user: User, details: PaymentDetails) -> None:
+    """Новые свои реквизиты из сбора — в список (такие же уже есть — не дублируем)."""
+    existing = parse_details_list(user.payment_details)
+    if not any(d.same_as(details) for d in existing) and len(existing) < MAX_DETAILS:
+        _store(user, [*existing, details])
