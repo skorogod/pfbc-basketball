@@ -48,7 +48,7 @@ from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.repositories.uow import UowFactory
 from pfbc_bot.schemas.events import EventCreate
 from pfbc_bot.schemas.payments import GamePaymentCreate, PaymentDetails, PaymentMethod
-from pfbc_bot.schemas.trainings import TrainingCreate
+from pfbc_bot.schemas.trainings import ScheduleCreate, TrainingCreate
 from pfbc_bot.services.container import Services
 from pfbc_bot.texts import ru
 
@@ -440,15 +440,16 @@ async def test_training_cancel_needs_confirmation(
 
     await harness.press(COACH, ItemAction(kind="tr", action="cancel", item_id=training.id).pack())
     assert "Отменить тренировку" in harness.session.texts_to(COACH)[-1]
-    assert (await services.trainings.get(training.id)).status == TrainingStatus.PLANNED
+    staff = await ctx_of(services, COACH)
+    assert (await services.trainings.get(staff, training.id)).status == TrainingStatus.PLANNED
 
     await harness.press(COACH, ItemAction(kind="confirm", action="no", item_id=0).pack())
-    assert (await services.trainings.get(training.id)).status == TrainingStatus.PLANNED
+    assert (await services.trainings.get(staff, training.id)).status == TrainingStatus.PLANNED
 
     await harness.press(
         COACH, ItemAction(kind="tr", action="cancel_ok", item_id=training.id).pack()
     )
-    assert (await services.trainings.get(training.id)).status == TrainingStatus.CANCELLED
+    assert (await services.trainings.get(staff, training.id)).status == TrainingStatus.CANCELLED
     assert any("отменена" in m.text for m in notifier.to(GROUP_ID))
 
 
@@ -892,6 +893,50 @@ async def test_forged_buttons_are_refused(
         await harness.press(PLAYER, data)
     assert set(harness.session.texts_to(PLAYER)[sent_before:]) <= {ru.NO_PERMISSION}
     # и ни один диалог (добавление тренировки, события) не начался
+    key = StorageKey(bot_id=harness.bot.id, chat_id=PLAYER, user_id=PLAYER)
+    assert await harness.dp.storage.get_state(key) is None
+
+
+async def test_forged_confirmation_buttons_leak_nothing(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """Первый шаг подтверждения (вопрос «отменить / перенести / удалить / запустить опрос?»)
+    по подделанной кнопке: игрок без прав не видит ни времени, ни зала чужой тренировки,
+    диалог не начинается."""
+    await bind(harness)
+    await harness.member(PLAYER, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    schedule = await services.trainings.add_schedule(
+        admin,
+        ScheduleCreate(
+            squad_id=squad.id,
+            weekday=2,
+            start_time=time(19, 0),
+            duration_minutes=90,
+            venue="Секретный зал",
+        ),
+    )
+    training = await services.trainings.add_one_off(
+        admin,
+        TrainingCreate(
+            squad_id=squad.id,
+            starts_at=datetime.now(UTC) + timedelta(days=2),
+            venue="Секретный зал",
+        ),
+    )
+    sent_before = len(harness.session.texts_to(PLAYER))
+    for data in (
+        ItemAction(kind="tr", action="cancel", item_id=training.id).pack(),
+        ItemAction(kind="tr", action="move", item_id=training.id).pack(),
+        ItemAction(kind="poll", action="start", item_id=training.id).pack(),
+        ItemAction(kind="sch", action="del", item_id=schedule.id).pack(),
+        ItemAction(kind="sch", action="add", item_id=squad.id).pack(),
+    ):
+        await harness.press(PLAYER, data)
+    replies = harness.session.texts_to(PLAYER)[sent_before:]
+    assert not any("Секретный зал" in t or "Отменить" in t or "Удалить" in t for t in replies)
     key = StorageKey(bot_id=harness.bot.id, chat_id=PLAYER, user_id=PLAYER)
     assert await harness.dp.storage.get_state(key) is None
 

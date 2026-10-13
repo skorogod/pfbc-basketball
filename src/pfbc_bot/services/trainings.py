@@ -62,12 +62,20 @@ class TrainingService:
             await uow.commit()
             return ScheduleDTO.model_validate(schedule)
 
-    async def get_schedule(self, schedule_id: int) -> ScheduleDTO:
+    async def get_schedule(self, actor: UserContext, schedule_id: int) -> ScheduleDTO:
+        """Строка расписания — для вопроса «удалить?»: уже на этом шаге право проверяется,
+        иначе подделанная кнопка показала бы расписание чужого состава."""
         async with self._uow_factory() as uow:
             schedule = await uow.trainings.get_schedule(schedule_id)
             if schedule is None or not schedule.is_active:
                 raise NotFound("Запись расписания не найдена")
+            require(actor, schedule.squad_id, Permission.SCHEDULE)
             return ScheduleDTO.model_validate(schedule)
+
+    @staticmethod
+    def check_schedule_access(actor: UserContext, squad_id: int) -> None:
+        """Право менять расписание состава — до начала ввода строки."""
+        require(actor, squad_id, Permission.SCHEDULE)
 
     async def list_schedules(self, squad_id: int) -> list[ScheduleDTO]:
         async with self._uow_factory() as uow:
@@ -151,11 +159,16 @@ class TrainingService:
             )
             return [TrainingDTO.model_validate(t) for t in trainings]
 
-    async def get(self, training_id: int) -> TrainingDTO:
+    async def get(
+        self, actor: UserContext, training_id: int, permission: Permission = Permission.SCHEDULE
+    ) -> TrainingDTO:
+        """Тренировка для действия с правом permission (отмена и перенос — расписание, опрос —
+        опрос): право проверяется уже на шаге вопроса, а не только при подтверждении."""
         async with self._uow_factory() as uow:
             training = await uow.trainings.get(training_id)
             if training is None:
                 raise NotFound("Тренировка не найдена")
+            require(actor, training.squad_id, permission)
             return TrainingDTO.model_validate(training)
 
     async def add_one_off(

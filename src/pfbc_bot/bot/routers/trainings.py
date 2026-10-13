@@ -138,11 +138,12 @@ async def on_schedule_action(
     if message is None:
         return
     if callback_data.action == "add":
+        services.trainings.check_schedule_access(ctx, callback_data.item_id)
         await state.set_state(ScheduleEdit.line)
         await state.update_data(squad_id=callback_data.item_id)
         await message.answer(ru.SCHEDULE_ADD_PROMPT)
     elif callback_data.action == "del":  # шаг 1: вопрос — ничего не меняет
-        schedule = await services.trainings.get_schedule(callback_data.item_id)
+        schedule = await services.trainings.get_schedule(ctx, callback_data.item_id)
         label = f"{WEEKDAY_SHORT[schedule.weekday]} {schedule.start_time:%H:%M} · {schedule.venue}"
         await message.answer(
             ru.SCHEDULE_CONFIRM_REMOVE.format(label=html.escape(label)),
@@ -223,7 +224,7 @@ async def on_training_action(
     if message is None:
         return
     if callback_data.action == "cancel":  # шаг 1: вопрос — ничего не меняет
-        training = await services.trainings.get(callback_data.item_id)
+        training = await services.trainings.get(ctx, callback_data.item_id)
         squad = await services.squads.get(training.squad_id)
         await message.answer(
             ru.TRAINING_CONFIRM_CANCEL.format(
@@ -237,6 +238,7 @@ async def on_training_action(
         await services.trainings.cancel(ctx, callback_data.item_id)
         await message.edit_text(ru.TRAINING_DONE, reply_markup=None)
     else:
+        await services.trainings.get(ctx, callback_data.item_id)  # перенос — с правом сразу
         await state.set_state(TrainingEdit.move)
         await state.update_data(training_id=callback_data.item_id)
         await message.answer(ru.TRAINING_MOVE_PROMPT)
@@ -246,7 +248,7 @@ async def on_training_action(
 async def on_training_move(
     message: Message, ctx: UserContext, services: Services, state: FSMContext
 ) -> None:
-    training = await services.trainings.get(int((await state.get_data())["training_id"]))
+    training = await services.trainings.get(ctx, int((await state.get_data())["training_id"]))
     squad = await services.squads.get(training.squad_id)
     try:
         naive = parse_local_datetime(
@@ -322,7 +324,9 @@ async def on_poll_action(
     if message is None:
         return
     if callback_data.action == "start":  # шаг 1: вопрос — ничего не меняет
-        training = await services.trainings.get(callback_data.item_id)
+        training = await services.trainings.get(
+            ctx, callback_data.item_id, Permission.TRAINING_POLL
+        )
         squad = await services.squads.get(training.squad_id)
         exists = await services.polls.has_training_poll(training.id)
         text = ru.POLL_CONFIRM_RESTART if exists else ru.POLL_CONFIRM_START
