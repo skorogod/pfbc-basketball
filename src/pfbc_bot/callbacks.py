@@ -40,6 +40,14 @@ ROSTER_START = "start"  # roster:start:<match_event_id> — спросить «�
 ROSTER_START_OK = "startok"  # roster:startok:<match_event_id> — подтверждено: выбор заявки
 ROSTER_NO = "no"  # roster:no — «Отмена» в вопросе подтверждения
 
+# «Все игроки оплатили» — тренеру (личка): «Завершить сбор». Тот же обработчик с подтверждением,
+# что у кнопки в сводке /attendance, — формат ItemAction(kind="gp", action="close") из
+# bot.keyboards.common: «it:gp:close:<payment_id>».
+GAME_PAYMENT_CLOSE = "it:gp:close"
+# «Все прислали квитанции» — тренеру (личка): то же для сбора квитанций, как кнопка в /receipts —
+# ItemAction(kind="rc", action="close"): «it:rc:close:<request_id>».
+RECEIPT_CLOSE = "it:rc:close"
+
 
 @dataclass(frozen=True, slots=True)
 class ParsedCallback:

@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 
+from pfbc_bot.bot.keyboards.common import ItemAction
 from pfbc_bot.domain.dates import local_to_utc
 from pfbc_bot.domain.enums import EventType, SquadRole
 from pfbc_bot.schemas.events import EventCreate
@@ -360,5 +361,18 @@ async def test_all_players_paid_notifies_once(
     await services.polls.record_answer(pay_poll, 2, [PAID], now=NOW)
     paid = [m for m in notifier.to(COACH) if "Все игроки оплатили" in m.text]
     assert len(paid) == 1 and "Оплатили 2 из 2" in paid[0].text
+    assert "Пожалуйста, проверьте, что все игроки внесли сумму." in paid[0].text
+    # кнопка «Завершить сбор» — тот же обработчик с подтверждением, что в сводке /attendance
+    [[close]] = paid[0].keyboard or [[]]
+    assert close.text == "🏁 Завершить сбор"
+    payment_id = int((close.callback_data or "").rsplit(":", 1)[1])
+    assert close.callback_data == ItemAction(kind="gp", action="close", item_id=payment_id).pack()
     await services.polls.record_answer(pay_poll, 2, [PAID], now=NOW)  # повторный голос
     assert len([m for m in notifier.to(COACH) if "Все игроки оплатили" in m.text]) == 1
+
+    # по кнопке (после подтверждения) сбор завершается: опрос «Оплатил» в группе закрыт
+    assert await services.game_payments.close(coach, payment_id, now=NOW) is True
+    assert notifier.stopped_polls[-1] == (CHAT_ID, 1000 + len(notifier.polls))
+    # в «Все оплатили» кнопка снята (правка без клавиатуры), сбор помечен завершённым
+    assert notifier.edits == [(COACH, paid[0].message_id, paid[0].text + "\n\n🏁 Сбор завершён.")]
+    assert await services.game_payments.close(coach, payment_id, now=NOW) is False

@@ -17,6 +17,7 @@ import html
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
+from typing import Any
 
 from sqlalchemy.exc import IntegrityError
 
@@ -60,9 +61,11 @@ from pfbc_bot.schemas.settings import (
 from pfbc_bot.schemas.squads import UserContext
 from pfbc_bot.schemas.users import UserDTO
 from pfbc_bot.services.common import (
+    close_notice,
     mention,
     profile,
     resolve_destination,
+    send_closable_notice,
     send_direct,
     send_to_squad,
     squad_tz,
@@ -675,22 +678,29 @@ class GamePaymentService:
                 amount=format_amount(payment.amount),
                 names=", ".join(profile(u) for u in players.values()),
             )
-            await self._send_to_owners(uow, payment, text)
+            close = InlineButton(
+                ru.PAYMENT_BTN_CLOSE, callback_data=f"{callbacks.GAME_PAYMENT_CLOSE}:{payment.id}"
+            )
+            # запоминается — чтобы снять кнопку, когда сбор завершат
+            payment.paid_notice = await self._send_to_owners(uow, payment, text, [[close]])
             await uow.commit()  # dm_available
         log.info("game_payment_all_paid", payment_id=payment_id)
         return True
 
-    async def _send_to_owners(self, uow: UnitOfWork, payment: GamePayment, text: str) -> None:
-        """Получателю денег и создавшему сбор; не дошло никому — тем, кто собирает деньги."""
+    async def _send_to_owners(
+        self, uow: UnitOfWork, payment: GamePayment, text: str, keyboard: Keyboard
+    ) -> dict[str, Any] | None:
+        """Получателю денег и создавшему сбор; не дошло никому — тем, кто собирает деньги.
+        Результат — для close_notice."""
         ids = {i for i in (payment.collector_user_id, payment.created_by_user_id) if i}
-        delivered = [
-            await send_direct(self._notifier, u, text)
-            for u in await uow.users.list_by_ids(sorted(ids))
-        ]
-        if not any(delivered):
-            await self._recipients.notify(
-                uow, self._notifier, payment.squad_id, Permission.GAME_PAYMENTS, text
+        owners = await uow.users.list_by_ids(sorted(ids))
+        sent = await send_closable_notice(self._notifier, owners, text, keyboard)
+        if sent is None:
+            staff = await self._recipients.with_permission(
+                uow, payment.squad_id, Permission.GAME_PAYMENTS
             )
+            sent = await send_closable_notice(self._notifier, staff, text, keyboard)
+        return sent
 
     async def status(self, actor: UserContext, event_id: int) -> PaymentStatus | None:
         """Оплата игры для сводки: None — денег за эту игру не собирали."""
@@ -734,6 +744,7 @@ class GamePaymentService:
             if poll is None or poll.closed_at is not None:
                 return False
             poll.closed_at = now
+            notice, payment.paid_notice = payment.paid_notice, None
             await uow.system.audit(
                 actor_user_id=actor.user.id,
                 action="game_payment.close",
@@ -743,6 +754,7 @@ class GamePaymentService:
             )
             await uow.commit()
         await self._notifier.stop_poll(poll.chat_id, poll.message_id)
+        await close_notice(self._notifier, notice)  # «Все оплатили»: кнопка больше не нужна
         return True
 
     async def remind_due(self, *, now: datetime | None = None) -> int:

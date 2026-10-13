@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
 
+from pfbc_bot import callbacks
 from pfbc_bot.db.models import Poll, ReceiptRequest, User
 from pfbc_bot.domain.dates import (
     due_payment_reminder,
@@ -37,16 +38,18 @@ from pfbc_bot.repositories.uow import UnitOfWork, UowFactory
 from pfbc_bot.schemas.settings import MAX_PAYMENT_REMINDER_INTERVAL_HOURS, MAX_PAYMENT_REMINDERS
 from pfbc_bot.schemas.squads import UserContext
 from pfbc_bot.services.common import (
+    close_notice,
     mention,
     profile,
     resolve_destination,
+    send_closable_notice,
     send_direct,
     send_to_squad,
     squad_tz,
 )
 from pfbc_bot.services.errors import Conflict, NotFound
 from pfbc_bot.services.permissions import require
-from pfbc_bot.services.ports import Notifier
+from pfbc_bot.services.ports import InlineButton, Notifier
 from pfbc_bot.services.settings import load_squad_settings
 from pfbc_bot.texts import ru
 
@@ -133,6 +136,7 @@ class ReceiptService:
             if poll is None or poll.closed_at is not None:
                 return None
             poll.closed_at = now
+            notice, request.all_sent_notice = request.all_sent_notice, None
             await uow.system.audit(
                 actor_user_id=actor.user.id,
                 action="receipt.close",
@@ -143,6 +147,7 @@ class ReceiptService:
             await uow.commit()
             month = month_title(request.month)
         await self._notifier.stop_poll(poll.chat_id, poll.message_id)
+        await close_notice(self._notifier, notice)  # «Все прислали»: кнопка больше не нужна
         return month
 
     async def create(
@@ -303,11 +308,14 @@ class ReceiptService:
                 squad=squad.name if squad else "?",
                 count=len(payers),
             )
-            delivered = [
-                await send_direct(self._notifier, coach, text)
-                for coach in await _coaches(uow, request.squad_id)
-            ]
-            if not any(delivered):
+            close = InlineButton(
+                ru.PAYMENT_BTN_CLOSE, callback_data=f"{callbacks.RECEIPT_CLOSE}:{request.id}"
+            )
+            # запоминается — чтобы снять кнопку, когда сбор завершат
+            request.all_sent_notice = await send_closable_notice(
+                self._notifier, await _coaches(uow, request.squad_id), text, [[close]]
+            )
+            if request.all_sent_notice is None:  # в группу — без кнопки: там её нажмут не те
                 await send_to_squad(
                     uow, self._notifier, request.squad_id, TopicPurpose.PAYMENTS, text
                 )

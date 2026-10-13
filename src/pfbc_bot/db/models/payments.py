@@ -90,6 +90,9 @@ class GamePayment(IdMixin, CreatedAtMixin, Base):
     cancelled_at: Mapped[datetime | None]
     # сообщение «Состав на матч» в группе (опубликовано перед постом сбора)
     roster_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    # «Все оплатили» с кнопкой «Завершить сбор» — {"text", "messages": [[chat_id, message_id]]}:
+    # при завершении сбора кнопка снимается; None — не отправлялось или уже снята
+    paid_notice: Mapped[dict[str, Any] | None]
 
 
 class GamePaymentPlayer(IdMixin, Base):
@@ -133,6 +136,9 @@ class ReceiptRequest(IdMixin, CreatedAtMixin, Base):
     squad_id: Mapped[int] = mapped_column(ForeignKey("squads.id", ondelete="CASCADE"), index=True)
     month: Mapped[date]  # первое число месяца (по часовому поясу состава)
     deadline_at: Mapped[datetime]
+    # «Все прислали» тренерам с кнопкой «Завершить сбор» — {"text", "messages": [[chat_id,
+    # message_id]]}: при завершении сбора кнопка снимается; None — не отправлялось или снята
+    all_sent_notice: Mapped[dict[str, Any] | None]
     # None — опубликован по расписанию
     created_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")

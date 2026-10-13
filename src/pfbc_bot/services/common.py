@@ -1,6 +1,7 @@
 """Общие помощники сервисов: адресация сообщений состава, рассылка руководству."""
 
 from collections.abc import Awaitable, Callable, Iterable
+from typing import Any
 
 from pfbc_bot.db.models import Squad, User
 from pfbc_bot.domain.enums import STAFF_ROLES, SquadRole, TopicPurpose
@@ -8,6 +9,7 @@ from pfbc_bot.repositories.uow import UnitOfWork
 from pfbc_bot.schemas.squads import Destination
 from pfbc_bot.schemas.users import UserDTO
 from pfbc_bot.services.ports import Keyboard, Notifier
+from pfbc_bot.texts import ru
 
 
 async def resolve_destination(
@@ -72,9 +74,40 @@ async def send_direct(
     notifier: Notifier, user: User, text: str, *, keyboard: Keyboard | None = None
 ) -> bool:
     """Личное сообщение. Обновляет признак dm_available по факту доставки."""
-    sent = await notifier.send_message(user.tg_user_id, text, keyboard=keyboard) is not None
-    user.dm_available = sent
-    return sent
+    return await send_direct_id(notifier, user, text, keyboard=keyboard) is not None
+
+
+async def send_direct_id(
+    notifier: Notifier, user: User, text: str, *, keyboard: Keyboard | None = None
+) -> int | None:
+    """Как send_direct, но возвращает message_id (None — не доставлено): чтобы потом снять
+    кнопку с сообщения."""
+    message_id = await notifier.send_message(user.tg_user_id, text, keyboard=keyboard)
+    user.dm_available = message_id is not None
+    return message_id
+
+
+async def send_closable_notice(
+    notifier: Notifier, users: Iterable[User], text: str, keyboard: Keyboard
+) -> dict[str, Any] | None:
+    """«Все оплатили / все прислали» с кнопкой «Завершить сбор» — в личку. Возвращает, что
+    запомнить у сбора для close_notice ({"text", "messages": [[chat_id, message_id]]});
+    None — никому не дошло."""
+    messages = []
+    for user in users:
+        message_id = await send_direct_id(notifier, user, text, keyboard=keyboard)
+        if message_id is not None:
+            messages.append([user.tg_user_id, message_id])
+    return {"text": text, "messages": messages} if messages else None
+
+
+async def close_notice(notifier: Notifier, notice: dict[str, Any] | None) -> None:
+    """Сбор завершён: в разосланных send_closable_notice сообщениях снять кнопку и отметить."""
+    if not notice:
+        return
+    text = notice["text"] + ru.COLLECTION_CLOSED_MARK
+    for chat_id, message_id in notice["messages"]:
+        await notifier.edit_message(chat_id, message_id, text)
 
 
 async def notify_staff(

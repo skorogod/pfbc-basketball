@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, time
 import pytest
 from sqlalchemy import text
 
+from pfbc_bot.bot.keyboards.common import ItemAction
 from pfbc_bot.domain.dates import local_to_utc
 from pfbc_bot.domain.enums import SquadRole, TopicPurpose
 from pfbc_bot.repositories.uow import UowFactory
@@ -197,8 +198,22 @@ async def test_all_sent_notifies_coach_once(
     await services.polls.record_answer("poll-1", CAPTAIN, [SENT], now=at(1, 12))
     done = [m for m in notifier.to(COACH) if "Все прислали" in m.text]
     assert len(done) == 1 and "ноябрь 2026" in done[0].text and "4 из 4" in done[0].text
+    assert "Пожалуйста, проверьте, что все игроки прислали квитанции." in done[0].text
     await services.polls.record_answer("poll-1", CAPTAIN, [SENT], now=at(1, 13))  # повтор
     assert len([m for m in notifier.to(COACH) if "Все прислали" in m.text]) == 1
+
+    # кнопка «Завершить сбор» — тот же обработчик с подтверждением, что в /receipts
+    [[close]] = done[0].keyboard or [[]]
+    assert close.text == "🏁 Завершить сбор"
+    request_id = int((close.callback_data or "").rsplit(":", 1)[1])
+    assert close.callback_data == ItemAction(kind="rc", action="close", item_id=request_id).pack()
+    coach = await ctx_of(services, COACH)
+    assert await services.receipts.close(coach, request_id, now=at(1, 14)) == "ноябрь 2026"
+    assert notifier.stopped_polls == [(CHAT_ID, 1001)]
+    # кнопка снята (правка без клавиатуры), сбор помечен завершённым
+    assert notifier.edits == [(COACH, done[0].message_id, done[0].text + "\n\n🏁 Сбор завершён.")]
+    assert await services.receipts.close(coach, request_id, now=at(1, 14)) is None
+    assert len(notifier.edits) == 1
 
 
 async def test_all_sent_goes_to_group_when_coach_dm_closed(
@@ -208,4 +223,6 @@ async def test_all_sent_goes_to_group_when_coach_dm_closed(
     notifier.blocked_dm = {COACH}
     for tg_id in (1, 2, 3, CAPTAIN):
         await services.polls.record_answer("poll-1", tg_id, [SENT], now=at(1, 11))
-    assert "Все прислали квитанции за ноябрь 2026" in notifier.to(CHAT_ID)[-1].text
+    in_group = notifier.to(CHAT_ID)[-1]
+    assert "Все прислали квитанции за ноябрь 2026" in in_group.text
+    assert in_group.keyboard is None  # в группе кнопку нажали бы не те

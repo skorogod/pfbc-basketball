@@ -498,7 +498,10 @@ RECEIPT_POST = (
     "в опросе ниже.\n⏰ До {deadline}"
 )
 RECEIPT_COACHES = ": {names}"
-RECEIPT_ALL_SENT = "✅ Все прислали квитанции за {month} ({squad}): {count} из {count}."
+RECEIPT_ALL_SENT = (
+    "✅ Все прислали квитанции за {month} ({squad}): {count} из {count}.\n\n"
+    "Пожалуйста, проверьте, что все игроки прислали квитанции."
+)
 RECEIPT_POLL_QUESTION = "🧾 Квитанция за {month}: отправили тренеру?"
 RECEIPT_REMINDER_DM = (
     "⏰ <b>Напоминание: квитанция за {month}</b> ({squad})\n"
@@ -531,8 +534,11 @@ GAME_PAYMENT_POST = (
 )
 GAME_PAYMENT_DEADLINE = "\n⏰ Оплатить до {when}"
 GAME_PAYMENT_ALL_PAID = (
-    "✅ Все игроки оплатили игру\n{event}\nОплатили {count} из {count} по {amount}: {names}"
+    "✅ Все игроки оплатили игру\n{event}\nОплатили {count} из {count} по {amount}: {names}\n\n"
+    "Пожалуйста, проверьте, что все игроки внесли сумму."
 )
+# дописывается в «Все оплатили / все прислали», когда сбор завершён (кнопка снимается)
+COLLECTION_CLOSED_MARK = "\n\n🏁 Сбор завершён."
 GAME_PAYMENT_POLL_QUESTION = "💰 Оплата игры «{title}»: {amount}"
 GAME_PAYMENT_REMINDER_DM = (
     "💰 Напоминание об оплате игры\n{event}\n\n<b>Сумма: {amount}</b>\n{details}\n\n"
