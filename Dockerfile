@@ -7,9 +7,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# зависимости — точные версии с хешами из lock-файла (pip-compile), отдельным слоем: пока
+# lock не менялся, пересборка образа их не скачивает заново
+COPY requirements.lock ./
+RUN pip install --require-hashes -r requirements.lock
+
 COPY pyproject.toml ./
 COPY src ./src
-RUN pip install .
+RUN pip install --no-deps .
 
 COPY alembic.ini ./
 COPY migrations ./migrations

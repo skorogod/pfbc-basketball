@@ -24,6 +24,17 @@ python -m pfbc_bot.main                    # бот (polling)
 python -m pfbc_bot.main_worker             # планировщик — в отдельном терминале
 ```
 
+Зависимости зафиксированы в lock-файлах: `requirements.lock` — для бота, точные версии с
+хешами (образ ставит их с `--require-hashes`); `requirements-dev.lock` — те же версии плюс
+инструменты разработки, без хешей (CI). Точно как в CI:
+`pip install -r requirements-dev.lock && pip install --no-deps -e .`.
+После изменения зависимостей в `pyproject.toml` lock-файлы пересобираются:
+
+```bash
+pip-compile --generate-hashes --strip-extras --allow-unsafe -o requirements.lock pyproject.toml
+pip-compile --strip-extras --allow-unsafe --extra dev -o requirements-dev.lock pyproject.toml
+```
+
 Проверки (то же самое запускает CI):
 
 ```bash
