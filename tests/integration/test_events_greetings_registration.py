@@ -12,7 +12,7 @@ from pfbc_bot.schemas.users import RegistrationData
 from pfbc_bot.services.container import Services
 from pfbc_bot.services.errors import PermissionDenied
 
-from .conftest import FakeNotifier
+from .conftest import ADMIN_TG_ID, FakeNotifier
 from .helpers import CHAT_ID, GREETINGS_THREAD, MATCH_THREAD, ctx_of, join, setup_squad
 
 MSK = "Europe/Moscow"
@@ -74,6 +74,32 @@ async def test_event_reminders_3_1_0_days_exactly_once(
 
     events = await services.events.upcoming([squad.id], now=at(date(2026, 10, 1), 12))
     assert [e.title for e, _, _ in events] == ["Турнир памяти"]
+
+
+async def test_event_reminder_days_change_applies_to_existing_event(
+    services: Services, notifier: FakeNotifier
+) -> None:
+    """Смещения читаются на каждом тике: [3, 1, 0] → [0] после создания — только в день события."""
+    squad = await setup_squad(services)
+    await join(services, COACH, at=LONG_AGO, role=SquadRole.COACH)
+    event_day = date(2026, 10, 10)
+    await services.events.create(
+        await ctx_of(services, COACH),
+        EventCreate(
+            squad_id=squad.id, type=EventType.MEETING, title="Собрание", starts_at=at(event_day, 18)
+        ),
+        now=at(date(2026, 10, 1), 12),
+    )
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    await services.settings.set_squad_value(admin, squad.id, "event_reminder_days", "[0]")
+
+    sent_days = []
+    for day_offset in range(6, -1, -1):
+        if await services.events.send_due_reminders(
+            now=at(event_day - timedelta(days=day_offset), 9)
+        ):
+            sent_days.append(day_offset)
+    assert sent_days == [0]
 
 
 async def test_birthday_greeting_once_in_greetings_topic(

@@ -145,6 +145,29 @@ async def test_repeated_reminders_skip_quiet_hours(
     assert len(notifier.to(1)) == 1 and len(notifier.to(2)) == 2
 
 
+async def test_interval_change_after_deadline_applies(
+    services: Services, notifier: FakeNotifier, match_id: int, roster: list[int]
+) -> None:
+    """Интервал читается на каждом тике: срок прошёл, интервал 24 ч → 6 ч — следующее
+    напоминание через 6 ч после срока, а не через 24."""
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    squad_id = (await services.events.get(match_id)).squad_id
+    await services.settings.set_squad_value(admin, squad_id, "game_payment_reminder_count", "3")
+    coach = await ctx_of(services, COACH)
+    await services.game_payments.create(
+        coach, payment(match_id, at(14), coach.user.id, roster), now=NOW
+    )
+    assert await services.game_payments.remind_due(now=at(14)) == 1
+
+    await services.settings.set_squad_value(
+        admin, squad_id, "game_payment_reminder_interval_hours", "6"
+    )
+    assert await services.game_payments.remind_due(now=at(15)) == 0
+    assert await services.game_payments.remind_due(now=at(20)) == 1
+    assert await services.game_payments.remind_due(now=at(21)) == 0
+    assert len(notifier.to(1)) == len(notifier.to(2)) == 2
+
+
 async def test_no_reminders_when_count_is_zero(
     services: Services, notifier: FakeNotifier, match_id: int, roster: list[int]
 ) -> None:
