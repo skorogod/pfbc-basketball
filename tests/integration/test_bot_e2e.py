@@ -812,12 +812,11 @@ async def test_game_pay_with_suggested_amount_and_new_details(
     assert saved.value == "+79991234567" and saved.bank == "Сбербанк"
 
 
-async def test_start_collection_from_notice(
-    harness: Harness, services: Services, notifier: FakeNotifier
-) -> None:
-    """«Буду (игрок)» отметили 10 → тренеру «Начать сбор» → подтверждение (голосование
-    закрывается) → заявка: одного убрать, добавить не голосовавшего → сумма → срок → без
-    выбора получателя → реквизиты задать, не сохранять → предпросмотр → публикация."""
+async def _notice_setup(
+    harness: Harness, services: Services, notifier: FakeNotifier, game_price: Decimal | None
+) -> str:
+    """Матч турнира (со стоимостью игры или без), «Буду (игрок)» отметили 10 → тренеру
+    уведомление; возвращает callback кнопки «Начать сбор»."""
     await bind(harness)
     players = list(range(1, 11))
     for tg_id in (COACH, *players, 11):
@@ -834,7 +833,7 @@ async def test_start_collection_from_notice(
             type="tournament",
             title="ABL",
             is_season=True,
-            game_price=Decimal("15000"),
+            game_price=game_price,
         ),
     )
     await services.events.create(
@@ -851,39 +850,113 @@ async def test_start_collection_from_notice(
     for tg_id in players:
         await services.polls.record_answer("poll-1", tg_id, [1])
     assert await services.game_payments.send_roster_updates() == 1
+    return notifier.to(COACH)[-1].buttons()[ru.ROSTER_BTN_START]
+
+
+DETAILS = PaymentDetails(method=PaymentMethod.PHONE, value="+79991234567", bank="Сбер")
+
+
+def _roster_screen(harness: Harness) -> tuple[str, list[str]]:
+    """Последний экран заявки тренеру (новое сообщение или правка): текст и кнопки."""
+    for m in reversed(harness.session.requests):
+        if (
+            isinstance(m, SendMessage | EditMessageText)
+            and m.chat_id == COACH
+            and isinstance(m.reply_markup, InlineKeyboardMarkup)
+        ):
+            labels = [b.text for row in m.reply_markup.inline_keyboard for b in row]
+            return m.text, labels
+    raise AssertionError("экрана заявки нет")
+
+
+def _done_button(harness: Harness) -> str:
+    """Текст кнопки «Готово…» на экране заявки."""
+    return next(label for label in _roster_screen(harness)[1] if "Готово" in label)
+
+
+async def test_start_collection_from_notice(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """Цена у турнира и сохранённые реквизиты: «Начать сбор» → сразу заявка (одного убрать,
+    добавить не голосовавшего) → «Готово. Начать сбор» → сбор в группе. Голосование
+    участия закрывается только при публикации."""
+    start = await _notice_setup(harness, services, notifier, Decimal("15000"))
+    coach = await ctx_of(services, COACH)
+    await services.game_payments.add_details(coach, DETAILS)
     notice = notifier.to(COACH)[-1]
-    start = notice.buttons()[ru.ROSTER_BTN_START]
 
     await harness.press(COACH, start)
-    assert "Голосование об участии будет закрыто" in harness.session.texts_to(COACH)[-1]
-    await harness.press(COACH, start.replace(":start:", ":startok:"))
-    assert notifier.stopped_polls[-1] == (GROUP_ID, 1001)
-    assert "Отмечено: <b>10</b> из 12" in harness.session.texts_to(COACH)[-1]
+    text = harness.session.texts_to(COACH)[-1]
+    assert "Отмечено: <b>10</b> из 12" in text
+    assert "С игрока: <b>1 500 ₽</b> (15 000 ₽ ÷ 10)" in text and "+79991234567" in text
+    assert notifier.stopped_polls == []  # голосование ещё открыто
+    assert _done_button(harness) == ru.ROSTER_BTN_START_NOW
 
     user10 = (await ctx_of(services, 10)).user.id
     user11 = (await ctx_of(services, 11)).user.id
     await harness.press(COACH, RosterPick(action="t", user_id=user10).pack())  # убрать
+    assert "(15 000 ₽ ÷ 9)" in _roster_screen(harness)[0]  # сводка пересчитана
     await harness.press(COACH, RosterPick(action="more").pack())
     await harness.press(COACH, RosterPick(action="t", user_id=user11).pack())  # не голосовал
     await harness.press(COACH, RosterPick(action="done").pack())
-    assert "15 000 ₽ ÷ 10 = <b>1 500 ₽</b>" in harness.session.texts_to(COACH)[-1]
-    await harness.press(COACH, Choice(flow="gp_amount", value="suggested").pack())
-    await harness.press(COACH, Choice(flow="gp_deadline", value="day").pack())
-    # получатель — сам нажавший: сразу реквизиты (сохранённых нет — ввод)
+    assert harness.session.texts_to(COACH)[-1] == ru.GAME_PAYMENT_CREATED
+
+    roster_post, post = (m.text for m in notifier.to(GROUP_ID)[-2:])
+    assert "Игроки (10)" in roster_post and "user11" in roster_post and "user10" not in roster_post
+    assert "Сумма: 1 500 ₽" in post and "+79991234567" in post
+    assert notifier.stopped_polls[-1] == (GROUP_ID, 1001)  # голосование закрыто при публикации
+    # кнопка в уведомлении снята; новые голоса уведомлений не дают
+    assert (COACH, notice.message_id, notice.text) in notifier.edits
+    assert await services.game_payments.send_roster_updates() == 0
+
+
+async def test_start_collection_without_price_and_details(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """Цены у турнира нет, реквизитов нет: «Указать стоимость игры» → реквизиты (не сохранять)
+    → «Готово. Начать сбор». Стоимость — только для этого сбора."""
+    start = await _notice_setup(harness, services, notifier, None)
+    coach = await ctx_of(services, COACH)
+
+    await harness.press(COACH, start)
+    assert ru.ROSTER_START_NO_PRICE in harness.session.texts_to(COACH)[-1]
+    assert _done_button(harness) == ru.ROSTER_BTN_ASK_PRICE
+    await harness.press(COACH, RosterPick(action="done").pack())
+    assert harness.session.texts_to(COACH)[-1] == ru.GAME_PAYMENT_ASK_GAME_PRICE
+    await harness.private(COACH, "15 000")
     await harness.press(COACH, Choice(flow="pd_method", value="card").pack())
     await harness.private(COACH, "4111 1111 1111 1111")
     await harness.private(COACH, "Т-Банк")
     await harness.press(COACH, Choice(flow="gp_save", value="no").pack())
-    assert "Игроки (10)" in harness.session.texts_to(COACH)[-1]
-    await harness.press(COACH, Choice(flow="gp_pub", value="yes").pack())
+    summary = harness.session.texts_to(COACH)[-1]
+    assert "С игрока: <b>1 500 ₽</b>" in summary and "4111 1111 1111 1111" in summary
+    assert notifier.stopped_polls == []
+    await harness.press(COACH, Choice(flow="gp_pub", value="start").pack())
 
-    roster_post, post = (m.text for m in notifier.to(GROUP_ID)[-2:])
-    assert "Игроки (10)" in roster_post and "user11" in roster_post and "user10" not in roster_post
+    post = notifier.to(GROUP_ID)[-1].text
     assert "Сумма: 1 500 ₽" in post and "4111 1111 1111 1111" in post
+    assert notifier.stopped_polls[-1] == (GROUP_ID, 1001)
     assert await services.game_payments.details_of(coach.user.id) == []  # не сохраняли
-    # кнопка в уведомлении снята; новые голоса уведомлений не дают
-    assert (COACH, notice.message_id, notice.text) in notifier.edits
-    assert await services.game_payments.send_roster_updates() == 0
+    match = (await services.game_payments.matches(coach, 1))[0]
+    assert match.tournament_id is not None
+    cup = await services.events.get(match.tournament_id)
+    assert cup.game_price is None  # турнир не меняется
+
+
+async def test_start_collection_price_entered_with_details(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    """Цены нет, реквизиты сохранены: ввод стоимости → сразу «Готово. Начать сбор»."""
+    start = await _notice_setup(harness, services, notifier, None)
+    await services.game_payments.add_details(await ctx_of(services, COACH), DETAILS)
+
+    await harness.press(COACH, start)
+    await harness.press(COACH, RosterPick(action="done").pack())
+    await harness.private(COACH, "12000")
+    assert "С игрока: <b>1 200 ₽</b>" in harness.session.texts_to(COACH)[-1]
+    await harness.press(COACH, Choice(flow="gp_pub", value="start").pack())
+    assert harness.session.texts_to(COACH)[-1] == ru.GAME_PAYMENT_CREATED
+    assert "Сумма: 1 200 ₽" in notifier.to(GROUP_ID)[-1].text
 
 
 async def test_permissions_admin_toggles_role(

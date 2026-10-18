@@ -4,8 +4,10 @@
 (стоимость игры ÷ заявка) → срок (сутки / без срока / своя дата) → получатель денег → его
 реквизиты (подтвердить; или задать — и сохранить в профиле?) → предпросмотр → «Состав на
 матч», пост и опрос «Оплатил» в топике match.
-«Начать сбор» (личка, когда «Буду (игрок)» набралось) — подтверждение «голосование закроется»
-→ заявка → … ; получатель — сам нажавший.
+«Начать сбор» (личка, когда «Буду (игрок)» набралось) — сразу заявка и одна кнопка «Готово…»:
+стоимость игры у турнира есть и реквизиты сохранены — сбор публикуется сразу (срок по умолчанию,
+первые реквизиты); иначе — только недостающее: стоимость игры, реквизиты. Получатель — сам
+нажавший; голосование участия закрывается при публикации.
 Реквизиты вводятся так же из /profile (тренер): способ → телефон или карта → банк.
 """
 
@@ -32,7 +34,7 @@ from pfbc_bot.bot.keyboards.common import (
 )
 from pfbc_bot.bot.states import GamePaymentCreation, PaymentDetailsInput
 from pfbc_bot.domain.dates import format_local, localize, parse_local_datetime, to_local, utcnow
-from pfbc_bot.domain.payments import format_amount, parse_amount
+from pfbc_bot.domain.payments import format_amount, parse_amount, per_player_amount
 from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.schemas.payments import (
     MAX_DETAILS,
@@ -45,7 +47,6 @@ from pfbc_bot.schemas.users import UserDTO
 from pfbc_bot.services.container import Services
 from pfbc_bot.services.errors import Conflict
 from pfbc_bot.services.events import format_short
-from pfbc_bot.services.game_payments import format_match_when
 from pfbc_bot.texts import ru
 
 router = Router(name="game_payments")
@@ -143,56 +144,133 @@ async def on_roster_start(
 ) -> None:
     parsed = callbacks.parse(callback.data or "")
     message = callback_message(callback)
-    if parsed.action == callbacks.ROSTER_NO:
+    if parsed.action == callbacks.ROSTER_NO:  # старый вопрос подтверждения
         await callback.answer()
         if message:
             await dismiss(message)
         return
-    event_id = parsed.args[0]
-    if parsed.action == callbacks.ROSTER_START:  # шаг 1: «голосование закроется — точно?»
-        choice = await services.game_payments.roster(ctx, event_id)
-        if choice.has_payment:
-            await callback.answer(ru.GAME_PAYMENT_ALREADY, show_alert=True)
-            return
+    if parsed.action not in (callbacks.ROSTER_START, callbacks.ROSTER_START_OK):
         await callback.answer()
-        if message is None:
-            return
-        builder = InlineKeyboardBuilder()
-        builder.button(
-            text=ru.ROSTER_BTN_CONFIRM,
-            callback_data=callbacks.pack(callbacks.ROSTER, callbacks.ROSTER_START_OK, event_id),
-        )
-        builder.button(
-            text=ru.BTN_CANCEL, callback_data=f"{callbacks.ROSTER}:{callbacks.ROSTER_NO}"
-        )
-        builder.adjust(2)
-        await message.answer(
-            ru.ROSTER_CONFIRM_START.format(
-                title=html.escape(choice.event.title),
-                when=format_match_when(choice.event, choice.tz),
-                count=sum(c.voted for c in choice.candidates),
-                max=choice.max_players,
-            ),
-            reply_markup=builder.as_markup(),
-        )
         return
-    if parsed.action == callbacks.ROSTER_START_OK:  # шаг 2: голосование закрыто → заявка
-        await services.game_payments.start_collection(ctx, event_id)
-        await callback.answer()
-        if message is None:
-            return
-        await message.edit_reply_markup(reply_markup=None)
-        event = await services.events.get(event_id)
-        squad = await services.squads.get(event.squad_id)
-        await state.clear()
-        await state.update_data(
-            event_id=event.id,
-            squad_id=squad.id,
-            tz=squad.timezone,
-            collector_id=ctx.user.id,  # деньги получает нажавший
-            from_start=True,  # уже объявленный сбор не заменяется
+    event_id = parsed.args[0]
+    game_price = await services.game_payments.check_start(ctx, event_id)
+    await callback.answer()
+    if message is None:
+        return
+    event = await services.events.get(event_id)
+    squad = await services.squads.get(event.squad_id)
+    saved = await services.game_payments.details_of(ctx.user.id)
+    deadline = await services.game_payments.default_deadline(ctx, squad.id)
+    await state.clear()
+    await state.update_data(
+        event_id=event.id,
+        squad_id=squad.id,
+        tz=squad.timezone,
+        collector_id=ctx.user.id,  # деньги получает нажавший
+        from_start=True,  # уже объявленный сбор не заменяется
+        game_price=str(game_price) if game_price is not None else None,
+        details=saved[0].model_dump(mode="json") if saved else None,  # первые сохранённые
+        deadline_hint=format_local(deadline, squad.timezone),
+    )
+    await _ask_roster(message, ctx, services, state)
+
+
+START_PUBLISH, START_PRICE, START_DETAILS = "publish", "price", "details"
+
+
+def _start_step(data: dict[str, object]) -> str:
+    """Что нужно после заявки: стоимость игры, реквизиты — или уже можно публиковать."""
+    if not data.get("game_price"):
+        return START_PRICE
+    if not data.get("details"):
+        return START_DETAILS
+    return START_PUBLISH
+
+
+def _start_summary(data: dict[str, object]) -> str:
+    """Каким будет сбор: сумма с игрока, срок, реквизиты (или что ещё указать)."""
+    players = len(data["roster"])  # type: ignore[arg-type]
+    lines = []
+    if price := data.get("game_price"):
+        game_price = Decimal(str(price))
+        lines.append(
+            ru.ROSTER_START_AMOUNT.format(
+                amount=format_amount(per_player_amount(game_price, players)) if players else "—",
+                price=format_amount(game_price),
+                players=players,
+            )
         )
-        await _ask_roster(message, ctx, services, state)
+    else:
+        lines.append(ru.ROSTER_START_NO_PRICE)
+    lines.append(ru.ROSTER_START_DEADLINE.format(when=data["deadline_hint"]))
+    if details := data.get("details"):
+        text = PaymentDetails.model_validate(details).text
+        lines.append(ru.ROSTER_START_DETAILS.format(details=html.escape(text)))
+    else:
+        lines.append(ru.ROSTER_START_NO_DETAILS)
+    return "\n".join(lines) + "\n" + ru.ROSTER_START_FOOTER
+
+
+async def _ask_start_confirm(message: Message, state: FSMContext) -> None:
+    """Всё известно — сводка и одна кнопка «Готово. Начать сбор»."""
+    await state.set_state(GamePaymentCreation.confirm)
+    data = await state.get_data()
+    await message.answer(
+        ru.ROSTER_START_SUMMARY.format(
+            title=html.escape(str(data["title"])),
+            players=len(data["roster"]),
+            lines=_start_summary(data),
+        ),
+        reply_markup=choices_keyboard(PUBLISH_FLOW, [("start", ru.ROSTER_BTN_START_NOW)]),
+    )
+
+
+async def _publish_from_start(
+    message: Message, ctx: UserContext, services: Services, state: FSMContext
+) -> None:
+    """Сбор из «Начать сбор»: сумма — стоимость игры ÷ заявка, срок по умолчанию."""
+    data = await state.get_data()
+    await state.clear()  # до публикации: двойное нажатие не создаст второй сбор
+    deadline = await services.game_payments.default_deadline(ctx, int(data["squad_id"]))
+    data["amount"] = str(per_player_amount(Decimal(data["game_price"]), len(data["roster"])))
+    data["deadline"] = deadline.isoformat()
+    await services.game_payments.create(ctx, _payment_data(data))
+    await message.answer(ru.GAME_PAYMENT_CREATED)
+
+
+async def _ask_start_details(
+    message: Message, ctx: UserContext, services: Services, state: FSMContext
+) -> None:
+    collector = await services.game_payments.collector(
+        ctx, int((await state.get_data())["squad_id"]), ctx.user.id
+    )
+    await _ask_details(message, ctx, services, state, collector)
+
+
+async def _after_details(
+    message: Message, ctx: UserContext, services: Services, state: FSMContext
+) -> None:
+    """Реквизиты выбраны или введены: из «Начать сбор» — кнопка старта, иначе предпросмотр."""
+    if (await state.get_data()).get("from_start"):
+        await _ask_start_confirm(message, state)
+    else:
+        await _preview(message, ctx, services, state)
+
+
+@router.message(GamePaymentCreation.game_price, F.text)
+async def on_game_price(
+    message: Message, ctx: UserContext, services: Services, state: FSMContext
+) -> None:
+    try:
+        price = parse_amount(message.text or "")
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    await state.update_data(game_price=str(price))  # только для этого сбора, турнир не меняется
+    if _start_step(await state.get_data()) == START_DETAILS:
+        await _ask_start_details(message, ctx, services, state)
+    else:
+        await _ask_start_confirm(message, state)
 
 
 # --- заявка: кто играет и платит ---
@@ -222,9 +300,12 @@ async def _ask_roster(
 
 def _roster_text(data: dict[str, object]) -> str:
     roster = list(data["roster"])  # type: ignore[call-overload]
-    return ru.ROSTER_CHOOSE.format(
+    text = ru.ROSTER_CHOOSE.format(
         title=html.escape(str(data["title"])), count=len(roster), max=data["roster_max"]
     )
+    if data.get("from_start"):
+        text += "\n\n" + _start_summary(data)
+    return text
 
 
 def _roster_markup(data: dict[str, object]) -> InlineKeyboardMarkup:
@@ -247,9 +328,15 @@ def _roster_markup(data: dict[str, object]) -> InlineKeyboardMarkup:
             text=ru.ROSTER_BTN_LESS if show_all and voted else ru.ROSTER_BTN_MORE,
             callback_data=RosterPick(action="less" if show_all else "more"),
         )
-    builder.button(
-        text=ru.ROSTER_BTN_DONE.format(count=len(roster)), callback_data=RosterPick(action="done")
-    )
+    if data.get("from_start"):
+        done = {
+            START_PUBLISH: ru.ROSTER_BTN_START_NOW,
+            START_PRICE: ru.ROSTER_BTN_ASK_PRICE,
+            START_DETAILS: ru.ROSTER_BTN_ASK_DETAILS,
+        }[_start_step(data)]
+    else:
+        done = ru.ROSTER_BTN_DONE.format(count=len(roster))
+    builder.button(text=done, callback_data=RosterPick(action="done"))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -270,9 +357,20 @@ async def on_roster_pick(
             await callback.answer(ru.ROSTER_EMPTY, show_alert=True)
             return
         await callback.answer()
-        if message is not None:
-            await message.edit_reply_markup(reply_markup=None)
+        if message is None:
+            return
+        await message.edit_reply_markup(reply_markup=None)
+        if not data.get("from_start"):
             await _ask_amount(message, ctx, services, state)
+            return
+        step = _start_step(data)
+        if step == START_PUBLISH:
+            await _publish_from_start(message, ctx, services, state)
+        elif step == START_PRICE:
+            await state.set_state(GamePaymentCreation.game_price)
+            await message.answer(ru.GAME_PAYMENT_ASK_GAME_PRICE)
+        else:
+            await _ask_start_details(message, ctx, services, state)
         return
     if callback_data.action == "t":
         uid = callback_data.user_id
@@ -518,7 +616,7 @@ async def on_details_choice(
         return
     await message.edit_reply_markup(reply_markup=None)
     await state.update_data(details=chosen)
-    await _preview(message, ctx, services, state)
+    await _after_details(message, ctx, services, state)
 
 
 # --- мои реквизиты (из /profile): список, добавить, изменить, удалить ---
@@ -724,7 +822,7 @@ async def on_save_details(
             await message.answer(ru.GAME_PAYMENT_DETAILS_SAVED)
         except Conflict as exc:  # лимит реквизитов — сбор продолжается без сохранения
             await message.answer(str(exc))
-    await _preview(message, ctx, services, state)
+    await _after_details(message, ctx, services, state)
 
 
 # --- предпросмотр и публикация ---
@@ -764,6 +862,10 @@ async def on_publish(
 ) -> None:
     await callback.answer()
     message = callback_message(callback)
+    if message is not None and callback_data.value == "start":  # «Готово. Начать сбор»
+        await message.edit_reply_markup(reply_markup=None)
+        await _publish_from_start(message, ctx, services, state)
+        return
     data = await state.get_data()
     await state.clear()  # до публикации: двойное нажатие не создаст второй сбор
     if message is None:

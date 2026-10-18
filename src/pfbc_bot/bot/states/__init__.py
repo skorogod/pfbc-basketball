@@ -65,6 +65,7 @@ class ReviewTime(StatesGroup):
 
 class GamePaymentCreation(StatesGroup):
     roster = State()  # заявка: кто играет и платит
+    game_price = State()  # «Начать сбор»: стоимость игры, если у турнира её нет
     amount = State()
     deadline = State()
     collector = State()

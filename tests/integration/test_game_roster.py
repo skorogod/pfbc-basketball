@@ -201,27 +201,22 @@ async def test_threshold_setting(services: Services, notifier: FakeNotifier, mat
     assert await services.game_payments.send_roster_updates(now=NOW) == 1
 
 
-async def test_start_collection_closes_poll_and_buttons(
+async def test_check_start_changes_nothing_until_publication(
     services: Services, notifier: FakeNotifier, match_id: int
 ) -> None:
+    """«Начать сбор» только проверяет: голосование и кнопки — до публикации сбора."""
     await vote(services, range(1, 11))
     await services.game_payments.send_roster_updates(now=NOW)
     coach = await ctx_of(services, COACH)
     with pytest.raises(PermissionDenied):
-        await services.game_payments.start_collection(
-            await ctx_of(services, CAPTAIN), match_id, now=NOW
-        )
-    await services.game_payments.start_collection(coach, match_id, now=NOW)
-    assert notifier.stopped_polls == [(CHAT_ID, 1001)]  # голосование участия закрыто
-    stripped = {(chat, mid) for chat, mid, _ in notifier.edits}
-    assert {(m.chat_id, m.message_id) for m in notifier.messages if START in m.buttons()} <= (
-        stripped
-    )
-    # тренер бросил выбор заявки — повторное «Начать сбор» продолжает, опрос не трогается
-    await services.game_payments.start_collection(coach, match_id, now=NOW)
-    assert notifier.stopped_polls == [(CHAT_ID, 1001)]
-    await vote(services, [11])  # голоса после закрытия ни на что не влияют
-    assert await services.game_payments.send_roster_updates(now=NOW + timedelta(minutes=1)) == 0
+        await services.game_payments.check_start(await ctx_of(services, CAPTAIN), match_id)
+    assert await services.game_payments.check_start(coach, match_id) == Decimal("15000")
+    assert notifier.stopped_polls == []
+    edits_before = len(notifier.edits)
+    # тренер бросил выбор заявки — голоса по-прежнему считаются, число в уведомлении растёт
+    await vote(services, [11])
+    assert await services.game_payments.send_roster_updates(now=NOW + timedelta(minutes=1)) == 1
+    assert len(notifier.edits) > edits_before
 
 
 async def test_roster_choice_and_amount(services: Services, match_id: int) -> None:
@@ -308,7 +303,7 @@ async def test_second_coach_cannot_override_started_collection(
         )
     assert len(notifier.messages) == sent_before  # проверено до отправки — в группе ничего
     with pytest.raises(Conflict):
-        await services.game_payments.start_collection(admin, match_id, now=NOW)
+        await services.game_payments.check_start(admin, match_id)
     status = await services.game_payments.status(coach, match_id)
     assert status is not None and status.payment.id == first.id
 

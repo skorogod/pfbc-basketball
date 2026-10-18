@@ -36,9 +36,9 @@ MATCH_FB_NONE = "none"  # mfb:none:<squad_id> — игры на этих вых�
 
 # «Отметились N игроков» — тренеру/админу (личка): начать сбор денег за игру.
 ROSTER = "roster"
-ROSTER_START = "start"  # roster:start:<match_event_id> — спросить «голосование закроется?»
-ROSTER_START_OK = "startok"  # roster:startok:<match_event_id> — подтверждено: выбор заявки
-ROSTER_NO = "no"  # roster:no — «Отмена» в вопросе подтверждения
+ROSTER_START = "start"  # roster:start:<match_event_id> — «Начать сбор»: сразу выбор заявки
+ROSTER_START_OK = "startok"  # прежний шаг подтверждения — в старых сообщениях, как start
+ROSTER_NO = "no"  # roster:no — «Отмена» в старых вопросах подтверждения
 
 # «Все игроки оплатили» — тренеру (личка): «Завершить сбор». Тот же обработчик с подтверждением,
 # что у кнопки в сводке /attendance, — формат ItemAction(kind="gp", action="close") из

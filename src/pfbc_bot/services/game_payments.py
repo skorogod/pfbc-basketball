@@ -16,7 +16,7 @@ match публикуется «Состав на матч». После дедл
 import html
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import ROUND_CEILING, Decimal
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
@@ -41,7 +41,7 @@ from pfbc_bot.domain.enums import (
     SquadRole,
     TopicPurpose,
 )
-from pfbc_bot.domain.payments import format_amount
+from pfbc_bot.domain.payments import format_amount, per_player_amount
 from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.logging import get_logger
 from pfbc_bot.repositories.uow import UnitOfWork, UowFactory
@@ -394,34 +394,16 @@ class GamePaymentService:
                 has_payment=await uow.game_payments.active_for_event(match.id) is not None,
             )
 
-    async def start_collection(
-        self, actor: UserContext, match_event_id: int, *, now: datetime | None = None
-    ) -> None:
-        """«Начать сбор» из уведомления: состав фиксируется — голосование участия закрывается,
-        кнопки в уведомлениях снимаются. Повторно (тренер бросил выбор заявки) — сценарий
-        продолжается. Уже объявленный сбор не перебивается; получатель денег — сам нажавший,
-        это проверяется до закрытия опроса."""
-        now = now or utcnow()
+    async def check_start(self, actor: UserContext, match_event_id: int) -> Decimal | None:
+        """«Начать сбор» из уведомления: можно ли (сбор ещё не объявлен, деньги получает сам
+        нажавший — тренер или админ). Ничего не меняет: голосование участия закрывается при
+        публикации сбора (create). Возвращает стоимость игры турнира (None — не указана)."""
         async with self._uow_factory() as uow:
-            match = await self._match(uow, actor, match_event_id, lock=True)
+            match = await self._match(uow, actor, match_event_id)
             await self._collector(uow, actor, match.squad_id, actor.user.id)
             if await uow.game_payments.active_for_event(match.id) is not None:
                 raise Conflict(ru.GAME_PAYMENT_ALREADY)
-            poll = await uow.polls.get_for_ref(PollType.MATCH, EVENT_REF, match.id)
-            to_stop = poll if poll is not None and poll.closed_at is None else None
-            if to_stop is not None:
-                to_stop.closed_at = now
-            hidden = await _hide_notices(uow, now, event_id=match.id)
-            await uow.system.audit(
-                actor_user_id=actor.user.id,
-                action="game_payment.start",
-                entity="event",
-                entity_id=match.id,
-            )
-            await uow.commit()
-        if to_stop is not None:
-            await self._notifier.stop_poll(to_stop.chat_id, to_stop.message_id)
-        await self._strip_buttons(hidden)
+            return await _game_price(uow, match)
 
     async def preview(self, actor: UserContext, data: GamePaymentCreate) -> PaymentPreview:
         """«Состав на матч» и пост сбора — показать тренеру перед публикацией."""
@@ -894,8 +876,9 @@ async def _game_price(uow: UnitOfWork, match: Event) -> Decimal | None:
 
 
 def _suggestion(price: Decimal, players: int) -> AmountSuggestion:
-    per_player = (price / players).to_integral_value(rounding=ROUND_CEILING)
-    return AmountSuggestion(game_price=price, players=players, per_player=per_player)
+    return AmountSuggestion(
+        game_price=price, players=players, per_player=per_player_amount(price, players)
+    )
 
 
 def _deliverable(notice: RosterNotice) -> bool:

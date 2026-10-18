@@ -1,7 +1,7 @@
 """Телефон и реквизиты для сбора денег: разбор ввода и проверка (чистые функции)."""
 
 import re
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 
 _DIGITS = re.compile(r"\D")
 
@@ -67,3 +67,8 @@ def format_amount(amount: Decimal) -> str:
     text = f"{whole:,}".replace(",", " ")
     kopecks = int((amount - whole) * 100)
     return f"{text},{kopecks:02d} ₽" if kopecks else f"{text} ₽"
+
+
+def per_player_amount(price: Decimal, players: int) -> Decimal:
+    """Сумма с игрока: стоимость игры ÷ заявка, вверх до рубля."""
+    return (price / players).to_integral_value(rounding=ROUND_CEILING)

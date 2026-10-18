@@ -7,6 +7,7 @@ from pfbc_bot.domain.payments import (
     normalize_card,
     normalize_phone,
     parse_amount,
+    per_player_amount,
 )
 from pfbc_bot.schemas.payments import PaymentDetails, PaymentMethod
 
@@ -46,3 +47,9 @@ def test_payment_details_text() -> None:
     assert phone.text == "📱 По номеру телефона: +79991234567 (Сбербанк)"  # Telegram подсветит
     card = PaymentDetails(method=PaymentMethod.CARD, value="4111111111111111", bank="Т-Банк")
     assert card.text == "💳 Карта: <code>4111 1111 1111 1111</code> (Т-Банк)"
+
+
+def test_per_player_amount_rounds_up_to_ruble() -> None:
+    assert per_player_amount(Decimal("15000"), 10) == Decimal("1500")
+    assert per_player_amount(Decimal("15000"), 9) == Decimal("1667")
+    assert per_player_amount(Decimal("100.50"), 1) == Decimal("101")
