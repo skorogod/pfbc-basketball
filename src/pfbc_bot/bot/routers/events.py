@@ -70,7 +70,7 @@ router.message.filter(F.chat.type == ChatType.PRIVATE)
 
 ADD, REVIEW_ADD = "ev_add", "ev_review"
 TYPE_FLOW, DURATION_FLOW, CONFLICT_FLOW = "ev_type", "ev_dur", "ev_conf"
-TITLE_FLOW, WHEN_FLOW, TOURNAMENT_FLOW = "ev_title", "ev_when", "ev_trn"
+WHEN_FLOW, TOURNAMENT_FLOW = "ev_when", "ev_trn"
 TOURNAMENT_START_FLOW, TOURNAMENT_LENGTH_FLOW = "ev_tstart", "ev_tlen"
 GAME_PRICE_FLOW, DIVISION_FLOW = "ev_price", "ev_div"
 PLACE_FLOW, DESCRIPTION_FLOW, PUBLISH_FLOW = "ev_place", "ev_descr", "ev_pub"
@@ -365,24 +365,15 @@ async def on_match_tournament(
 
 async def _ask_title(message: Message, state: FSMContext, event_type: EventType) -> None:
     await state.set_state(EventCreation.title)
-    markup = None
-    if event_type == EventType.REVIEW:
-        markup = choices_keyboard(TITLE_FLOW, [("default", ru.REVIEW_TITLE_DEFAULT)])
-    await message.answer(ru.EVENT_ASK_TITLE, reply_markup=markup)
+    await message.answer(
+        ru.REVIEW_ASK_TITLE if event_type == EventType.REVIEW else ru.EVENT_ASK_TITLE
+    )
 
 
 @router.message(EventCreation.title, F.text)
 async def on_title(message: Message, services: Services, state: FSMContext) -> None:
     await state.update_data(title=(message.text or "").strip()[:200])
     await _ask_when(message, services, state)
-
-
-@router.callback_query(EventCreation.title, Choice.filter(F.flow == TITLE_FLOW))
-async def on_title_default(callback: CallbackQuery, services: Services, state: FSMContext) -> None:
-    await callback.answer()
-    await state.update_data(title=ru.REVIEW_TITLE_DEFAULT)
-    if message := callback_message(callback):
-        await _ask_when(message, services, state)
 
 
 async def _ask_when(message: Message, services: Services, state: FSMContext) -> None:

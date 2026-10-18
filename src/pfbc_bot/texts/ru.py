@@ -417,7 +417,7 @@ EVENT_ASK_WHEN_REVIEW_NO_DEFAULT = (
     "(Ближайших тренировок нет — время по умолчанию предложить не могу.)"
 )
 EVENT_BTN_REVIEW_DEFAULT = "🗓 {when} — за час до тренировки"
-REVIEW_TITLE_DEFAULT = "Разбор игры"
+REVIEW_ASK_TITLE = "Матч или соперник (например, PFBC — Динамо):"
 TOURNAMENT_ASK_START = (
     "Дата старта турнира: <code>дд.мм.гггг</code> — или кнопка, если она пока неизвестна."
 )
@@ -490,9 +490,8 @@ REVIEW_PROPOSAL_NO_DEFAULT = (
 REVIEW_BTN_PUBLISH = "✅ Да, {when}"
 REVIEW_BTN_OTHER_TIME = "🕒 Другое время"
 REVIEW_ASK_TIME = "Дата и время разбора: <code>дд.мм.гггг чч:мм</code>"
-REVIEW_CREATED = "✅ Разбор назначен: {when}. Пост и опрос опубликованы в группе."
+REVIEW_CREATED = "✅ Разбор назначен: {when}. Опрос опубликован в группе и закреплён."
 REVIEW_ALREADY = "Разбор по этому матчу уже назначен."
-REVIEW_TITLE_FOR_MATCH = "Разбор игры: {title}"
 BTN_YES = "Да"
 BTN_NO = "Нет"
 BTN_CANCEL = "Отмена"

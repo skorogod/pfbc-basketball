@@ -423,8 +423,21 @@ async def test_review_offered_after_match(
     proposal = await services.events.review_proposal(coach, match.id, now=at(14))
     assert proposal.default_at == at(18)  # за час до тренировки 19:00 в тот же день
     review = await services.events.create_review(coach, match.id, at(18), now=at(14))
-    assert review.type == EventType.REVIEW and review.title == "Разбор игры: PFBC — Динамо"
-    assert "Разбор игры: Разбор игры: PFBC — Динамо" in notifier.polls[-1][1]
+    assert review.type == EventType.REVIEW and review.title == "PFBC — Динамо"
+    # поста нет — в опросе вся информация, закреплён опрос
+    question = notifier.polls[-1][1]
+    assert question == "Разбор игры: PFBC — Динамо, пн 12.10.2026 18:00–19:00. Будешь?"
+    assert not any(m.chat_id == CHAT_ID and "Разбор игры" in m.text for m in notifier.messages)
+    poll_message_id = 1000 + len(notifier.polls)
+    assert notifier.pinned[-1] == (CHAT_ID, poll_message_id)
+    assert review.posted and review.poll_posted
+
+    # перенос: старый опрос откреплён, новый закреплён, сообщение о переносе — без закрепа
+    moved = await services.events.move(coach, review.id, at(19), now=at(14))
+    assert (CHAT_ID, poll_message_id) in notifier.unpinned
+    assert notifier.pinned[-1] == (CHAT_ID, 1000 + len(notifier.polls))
+    assert "Перенесено — Разбор игры: PFBC — Динамо" in notifier.messages[-1].text
+    assert moved.posted and moved.poll_posted
 
     with pytest.raises(Conflict):  # второй тренер или двойное нажатие
         await services.events.create_review(actor, match.id, at(18), now=at(14))

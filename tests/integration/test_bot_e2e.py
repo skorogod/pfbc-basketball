@@ -556,8 +556,8 @@ async def test_admin_becomes_member_by_bind_or_start(
 async def test_review_with_default_time_and_tournament_links(
     harness: Harness, services: Services, notifier: FakeNotifier
 ) -> None:
-    """/review: название и время по умолчанию кнопками → пост и опрос; /tournaments: админ
-    привязывает матч к турниру."""
+    """/review: название текстом, время по умолчанию кнопкой → закреплённый опрос;
+    /tournaments: админ привязывает матч к турниру."""
     await bind(harness)
     await harness.member(COACH, joined=True)
     squad = await services.squads.squad_for_chat(GROUP_ID)
@@ -573,7 +573,8 @@ async def test_review_with_default_time_and_tournament_links(
     )
 
     await harness.private(COACH, "/review")
-    await harness.press(COACH, Choice(flow="ev_title", value="default").pack())
+    assert harness.session.texts_to(COACH)[-1] == ru.REVIEW_ASK_TITLE
+    await harness.private(COACH, "PFBC — Динамо")
     assert ru.EVENT_ASK_WHEN_REVIEW in harness.session.texts_to(COACH)[-1]
     await harness.press(COACH, Choice(flow="ev_when", value="default").pack())
     await harness.press(COACH, Choice(flow="ev_dur", value="60").pack())
@@ -582,7 +583,10 @@ async def test_review_with_default_time_and_tournament_links(
     await harness.press(COACH, Choice(flow="ev_pub", value="yes").pack())
 
     assert ru.EVENT_PUBLISHED_WITH_POLL in harness.session.texts_to(COACH)[-1]
-    assert "Разбор игры: Разбор игры" in notifier.polls[-1][1]
+    # у разбора нет отдельного поста: в группу — только опрос, и закреплён он
+    assert not [m for m in notifier.to(GROUP_ID) if "Разбор игры" in m.text]
+    assert notifier.polls[-1][1].startswith("Разбор игры: PFBC — Динамо, ")
+    assert notifier.pinned[-1] == (GROUP_ID, 1000 + len(notifier.polls))
     events = await services.events.upcoming([squad.id])
     assert [(e.type, e.starts_at) for e, _, _ in events] == [
         ("review", training_at - timedelta(hours=1))

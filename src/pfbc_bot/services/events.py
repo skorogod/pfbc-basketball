@@ -401,9 +401,24 @@ class EventService:
             place=f"\n📍 {html.escape(dto.place)}" if dto.place else "",
             tournament=_tournament_line(dto),
         )
+        if dto.type == EventType.REVIEW:  # у разбора закреплён опрос, сообщение о переносе — нет
+            posted = (
+                await self._notifier.send_message(
+                    destination.chat_id, text, thread_id=destination.thread_id
+                )
+                is not None
+            )
+            return dto.model_copy(
+                update={
+                    "posted": posted,
+                    "poll_posted": await self._publish_pinned_poll(dto, tz, destination),
+                }
+            )
         posted = await self._post_pinned(dto, destination, text)
         poll_posted = (
-            await self._publish_poll(dto, tz, destination) if dto.type in EVENT_POLLS else None
+            await self._publish_poll(dto, tz, destination) is not None
+            if dto.type in EVENT_POLLS
+            else None
         )
         return dto.model_copy(update={"posted": posted, "poll_posted": poll_posted})
 
@@ -412,11 +427,24 @@ class EventService:
         пользователь узнал, если что-то не дошло (бота удалили из группы и т.п.)."""
         if destination is None:
             return dto.model_copy(update={"posted": False})
+        if dto.type == EventType.REVIEW:  # у разбора нет отдельного поста: всё — в опросе
+            posted = await self._publish_pinned_poll(dto, tz, destination)
+            return dto.model_copy(update={"posted": posted, "poll_posted": posted})
         posted = await self._post_pinned(dto, destination, format_announcement(dto, tz))
         poll_posted = (
-            await self._publish_poll(dto, tz, destination) if dto.type in EVENT_POLLS else None
+            await self._publish_poll(dto, tz, destination) is not None
+            if dto.type in EVENT_POLLS
+            else None
         )
         return dto.model_copy(update={"posted": posted, "poll_posted": poll_posted})
+
+    async def _publish_pinned_poll(self, dto: EventDTO, tz: str, destination: Destination) -> bool:
+        """Опрос участия с тихим закрепом — вместо поста (разбор игры)."""
+        message_id = await self._publish_poll(dto, tz, destination)
+        if message_id is None:
+            return False
+        await self._pin(dto.id, destination.chat_id, message_id)
+        return True
 
     async def _post_pinned(self, dto: EventDTO, destination: Destination, text: str) -> bool:
         """Пост о событии (анонс или перенос) — с тихим закрепом, чтобы информация о нём
@@ -427,14 +455,18 @@ class EventService:
         )
         if message_id is None:
             return False
-        if await self._notifier.pin_message(destination.chat_id, message_id):
+        await self._pin(dto.id, destination.chat_id, message_id)
+        return True
+
+    async def _pin(self, event_id: int, chat_id: int, message_id: int) -> None:
+        """Тихий закреп сообщения события; запоминается, чтобы снять его позже."""
+        if await self._notifier.pin_message(chat_id, message_id):
             async with self._uow_factory() as uow:
-                event = await uow.events.get(dto.id)
+                event = await uow.events.get(event_id)
                 if event is not None:
-                    event.pinned_chat_id = destination.chat_id
+                    event.pinned_chat_id = chat_id
                     event.pinned_message_id = message_id
                     await uow.commit()
-        return True
 
     async def unpin_ended(self, *, now: datetime | None = None) -> int:
         """Тик: снимает закреп с постов о закончившихся событиях. Сезонный турнир (конец
@@ -585,17 +617,19 @@ class EventService:
             )
             await uow.commit()  # dm_available
 
-    async def _publish_poll(self, event: EventDTO, tz: str, destination: Destination) -> bool:
-        """Опрос участия сразу после поста — для матча, турнира и разбора игры. Если Telegram
-        опрос не принял, событие всё равно создаётся: пост в группе уже есть."""
+    async def _publish_poll(self, event: EventDTO, tz: str, destination: Destination) -> int | None:
+        """Опрос участия сразу после поста — для матча и турнира; у разбора игры поста нет,
+        опрос — единственное сообщение (с интервалом и местом). Если Telegram опрос не принял,
+        событие всё равно создаётся. Возвращает message_id опроса."""
         spec = EVENT_POLLS.get(event.type)
         if spec is None:
-            return False
-        when = (
-            format_local(event.starts_at, tz)
-            if event.type != EventType.TOURNAMENT and event.starts_at is not None
-            else format_when(event, tz)
-        )
+            return None
+        if event.type == EventType.REVIEW:
+            when = format_when(event, tz) + (f", 📍 {event.place}" if event.place else "")
+        elif event.type != EventType.TOURNAMENT and event.starts_at is not None:
+            when = format_local(event.starts_at, tz)
+        else:
+            when = format_when(event, tz)
         tournament = (
             ru.EVENT_POLL_TOURNAMENT.format(title=event.tournament_title)
             if event.tournament_title
@@ -612,7 +646,7 @@ class EventService:
         )
         if sent is None:
             log.warning("event_poll_not_sent", event_id=event.id)
-            return False
+            return None
         async with self._uow_factory() as uow:
             await uow.polls.add(
                 Poll(
@@ -629,7 +663,7 @@ class EventService:
                 )
             )
             await uow.commit()
-        return True
+        return sent.message_id
 
     @staticmethod
     async def _active_poll(uow: UnitOfWork, event: Event | EventDTO) -> Poll | None:
@@ -948,7 +982,7 @@ class EventService:
         *,
         now: datetime | None = None,
     ) -> EventDTO:
-        """Разбор игры по матчу: событие с постом и опросом «Буду / Не смогу» в группе.
+        """Разбор игры по матчу: событие с закреплённым опросом «Буду / Не смогу» в группе.
         По одному матчу — один разбор (повторное нажатие, второй тренер — отказ)."""
         now = now or utcnow()
         async with self._uow_factory() as uow:
@@ -966,7 +1000,7 @@ class EventService:
                 EventCreate(
                     squad_id=squad_id,
                     type=EventType.REVIEW,
-                    title=ru.REVIEW_TITLE_FOR_MATCH.format(title=title)[:200],
+                    title=title[:200],  # тип «Разбор игры» добавляют шаблоны
                     starts_at=starts_at,
                     duration_minutes=REVIEW_DURATION_MINUTES,
                     notify_group=True,
