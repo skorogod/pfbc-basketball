@@ -70,7 +70,7 @@ def test_counts_players_once_per_skill_and_separates_own_votes() -> None:
 def test_load_zone_boundaries() -> None:
     for scores, label in [
         ((1, 3, 3.49), "Лёгкая"),
-        ((3.5, 4, 6, 6.49), "Умеренная"),
-        ((6.5, 7, 10), "Высокая"),
+        ((3.5, 4, 7, 7.49), "Умеренная"),
+        ((7.5, 8, 10), "Высокая"),
     ]:
         assert all(zone(value)[2] == label for value in scores)
