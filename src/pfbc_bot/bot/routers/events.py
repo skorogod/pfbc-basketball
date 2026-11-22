@@ -373,6 +373,20 @@ async def _ask_title(message: Message, state: FSMContext, event_type: EventType)
 @router.message(EventCreation.title, F.text)
 async def on_title(message: Message, services: Services, state: FSMContext) -> None:
     await state.update_data(title=(message.text or "").strip()[:200])
+    if (await state.get_data()).get("type") == EventType.MATCH.value:
+        await state.set_state(EventCreation.opponent)
+        await message.answer("Название соперника?")
+        return
+    await _ask_when(message, services, state)
+
+
+@router.message(EventCreation.opponent, F.text)
+async def on_opponent(message: Message, services: Services, state: FSMContext) -> None:
+    opponent = (message.text or "").strip()
+    if not 1 <= len(opponent) <= 200:
+        await message.answer("Введите название соперника длиной до 200 символов.")
+        return
+    await state.update_data(opponent=opponent)
     await _ask_when(message, services, state)
 
 
@@ -739,6 +753,7 @@ async def _create(
                 squad_id=data["squad_id"],
                 type=EventType(data["type"]),
                 title=data["title"],
+                opponent=data.get("opponent"),
                 starts_at=data.get("starts_at"),
                 duration_minutes=data.get("duration_minutes", 90),
                 duration_days=data.get("duration_days"),

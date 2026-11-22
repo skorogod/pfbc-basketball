@@ -20,6 +20,7 @@ COPY alembic.ini ./
 COPY migrations ./migrations
 
 RUN useradd --create-home --uid 1000 bot
+RUN install -d -o bot -g bot /app/reports
 USER bot
 
 EXPOSE 8080

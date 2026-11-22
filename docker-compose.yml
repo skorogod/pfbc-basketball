@@ -4,6 +4,8 @@ x-app: &app
   build: .
   image: pfbc-bot:latest
   pull_policy: build
+  volumes:
+    - survey_reports:/app/reports
   env_file: .env
   environment:
     DATABASE_URL: *database_url
@@ -88,6 +90,7 @@ services:
         condition: service_healthy
 
 volumes:
+  survey_reports:
   pgdata:
   caddy_data:
   caddy_config:

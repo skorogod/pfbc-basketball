@@ -712,6 +712,8 @@ async def test_match_add_starts_with_tournament_choice(
     await harness.press(COACH, Choice(flow="ev_trn", value=str(league.id)).pack())
     assert harness.session.texts_to(COACH)[-1] == ru.EVENT_ASK_TITLE
     await harness.private(COACH, "PFBC — Динамо")
+    assert harness.session.texts_to(COACH)[-1] == "Название соперника?"
+    await harness.private(COACH, "Динамо")
     await harness.private(COACH, f"{day:%d.%m.%Y} 12:00")
     await harness.press(COACH, Choice(flow="ev_dur", value="120").pack())
     await harness.press(COACH, Choice(flow="ev_place", value="skip").pack())
@@ -1417,3 +1419,36 @@ async def test_admin_sees_member_details(
     )
     assert f"Роли: игрок{ru.CARD_BOT_ADMIN}" in harness.session.texts_to(ADMIN_TG_ID)[-1]
     assert "01.01.2000" not in card
+
+
+async def test_postmatch_invitation_and_decline(
+    harness: Harness, services: Services, notifier: FakeNotifier, uow_factory: UowFactory
+) -> None:
+    from pfbc_bot.db.models import Event, MatchSurvey
+    from pfbc_bot.domain.enums import EventType
+
+    await bind(harness)
+    await harness.member(PLAYER, joined=True)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad
+    player = await ctx_of(services, PLAYER)
+    async with uow_factory() as uow:
+        match = Event(type=EventType.MATCH, squad_id=squad.id, title="Финал", starts_at=NOW)
+        uow.session.add(match)
+        await uow.session.flush()
+        survey = MatchSurvey(event_id=match.id, status="skipped", scheduled_at=NOW)
+        uow.session.add(survey)
+        await uow.commit()
+    await harness.private(ADMIN_TG_ID, "/postmatch")
+    await harness.press(ADMIN_TG_ID, f"psm:{survey.id}:card")
+    assert "Финал" in harness.session.texts_to(ADMIN_TG_ID)[-1]
+    await harness.press(ADMIN_TG_ID, f"psm:{survey.id}:join:{player.user.id}")
+    decline = notifier.to(PLAYER)[-1].buttons()["Не буду проходить опрос"]
+    await harness.press(PLAYER, decline)
+    assert "Подтвердить" in harness.session.texts_to(PLAYER)[-1]
+    await harness.press(PLAYER, decline.replace(":declined", ":yes_declined"))
+    assert "Решение сохранено" in harness.session.texts_to(PLAYER)[-1]
+    await harness.press(ADMIN_TG_ID, f"psm:{survey.id}:preview")
+    assert "Ответили 0 из 0" in harness.session.texts_to(ADMIN_TG_ID)[-1]
+    await harness.press(ADMIN_TG_ID, f"psm:{survey.id}:request:0:match:docx")
+    assert "Отчёт готовится" in harness.session.texts_to(ADMIN_TG_ID)[-1]

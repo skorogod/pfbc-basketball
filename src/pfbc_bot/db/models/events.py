@@ -30,6 +30,7 @@ class Event(IdMixin, CreatedAtMixin, Base):
 
     squad_id: Mapped[int] = mapped_column(ForeignKey("squads.id", ondelete="CASCADE"))
     type: Mapped[EventType] = mapped_column(str_enum(EventType))
+    opponent: Mapped[str | None] = mapped_column(String(200))
     title: Mapped[str] = mapped_column(String(200))
     starts_at: Mapped[datetime | None]
     duration_minutes: Mapped[int] = mapped_column(default=90, server_default=text("90"))

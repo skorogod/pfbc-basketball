@@ -12,7 +12,7 @@ from typing import TypeVar
 from aiogram import Bot
 from aiogram.enums import ChatMemberStatus, ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
+from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
 
 from pfbc_bot.logging import get_logger
 from pfbc_bot.services.ports import Keyboard, SentPoll
@@ -141,6 +141,21 @@ class TelegramNotifier:
             log.warning("telegram_edit_failed", chat_id=chat_id, error=str(exc))
             return False
         return True
+
+    async def send_document(self, chat_id: int, path: str, *, thread_id: int | None = None) -> bool:
+        try:
+            await self._with_thread_fallback(
+                thread_id,
+                lambda tid: self._bot.send_document(
+                    chat_id,
+                    FSInputFile(path, filename="Отчёт." + path.rsplit(".", 1)[-1]),
+                    message_thread_id=tid,
+                ),
+            )
+            return True
+        except TelegramAPIError:
+            log.warning("survey_document_delivery_failed", chat_id=chat_id)
+            return False
 
     async def send_poll(
         self,
