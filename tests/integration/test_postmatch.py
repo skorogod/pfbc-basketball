@@ -85,7 +85,7 @@ async def test_survey_lifecycle(
     await asyncio.gather(svc.reports.request(coach, sid), svc.reports.request(other, sid))
     async with uow_factory() as uow:
         [report] = list(await uow.session.scalars(select(SurveyReport)))
-        assert report.snapshot["games"][0]["stats"]["n"] == 0
+        assert report.snapshot["games"][-1]["stats"]["n"] == 0
         assert await uow.session.scalar(select(func.count()).select_from(ReportRecipient)) == 2
     for step, code, value in [
         (1, "7", None),
@@ -101,9 +101,6 @@ async def test_survey_lifecycle(
     ]:
         await action(first, step, code, value)
     assert "уже принят" in (await action(first, 0, "start"))[0]
-    await services.settings.set_squad_value(
-        admin, squad.id, "survey_sensitive_users", f"[{coach.user.id}]"
-    )
     await action(second, 0, "yes_declined")
     async with uow_factory() as uow:
         s = await uow.session.get(MatchSurvey, sid)
@@ -114,18 +111,18 @@ async def test_survey_lifecycle(
             1,
         )
         reports = list(await uow.session.scalars(select(SurveyReport)))
-        final = [r for r in reports if r.snapshot["games"][0]["final"]]
-        assert len(final) == 3
+        final = [r for r in reports if r.snapshot["games"][-1]["final"]]
+        assert len(final) == 2
         for r in final:
-            game = r.snapshot["games"][0]
+            game = r.snapshot["games"][-1]
             assert game["stats"]["absent"] == game["stats"]["declined"] == 1
-            assert ("частный комментарий" in str(game)) == (r.visibility == "sensitive")
+            assert ("частный комментарий" in str(game)) == (r.visibility == "staff")
             if r.visibility == "group":
                 assert not game["rows"]
     await svc.reports.process()
     assert notifier.to(CHAT_ID)[-1].thread_id == 44
     doc = PdfReader(notifier.to(CHAT_ID)[-1].text)
-    assert sum(len(page.images) for page in doc.pages) == 2
+    assert sum(len(page.images) for page in doc.pages) >= 4
     assert all("ФИО" not in page.extract_text() for page in doc.pages)
     assert "готов, отправляю" in await svc.reports.request(coach, sid)
     await svc.reports.process()
@@ -259,9 +256,19 @@ async def test_history_periods_and_player_comparison(
                     }
                 uow.session.add(p)
             sid = s.id
+            if day == 3:
+                middle_sid, middle_event = s.id, e.id
         await uow.commit()
     with pytest.raises(PermissionDenied, match="Нет доступа"):
         await svc.reports.request(players[0], sid, period="5")
+    with pytest.raises(PermissionDenied):
+        await svc.reports.request(players[0], sid, player=players[1].user.id)
+    with pytest.raises(PermissionDenied):
+        await svc.reports.request(players[0], sid, player=players[0].user.id, kind="csv")
+    await svc.reports.request(players[1], sid, player=players[1].user.id)
+    assert (await svc.reports.own_surveys(players[1]))[0][0] == sid
+    assert set(await svc.reports.report_players(admin, sid)) == {ctx.user.id for ctx in players}
+    await svc.reports.request(admin, middle_sid, period="all")
     for period in ("5", "10", "20", "all", "2000-01-01..2000-01-02"):
         await svc.reports.request(admin, sid, period=period)
     await svc.reports.request(admin, sid, period="5", player=players[1].user.id)
@@ -273,16 +280,19 @@ async def test_history_periods_and_player_comparison(
             if r.kind == "csv":
                 continue
             if r.snapshot["player"]:
+                assert all(row["id"] == players[1].user.id for g in games for row in g["rows"])
                 assert [g["opponent"] for g in games] == ["M5", "M6"]
             elif r.snapshot["period"] == "5":
                 assert [g["opponent"] for g in games] == ["M2", "M3", "M4", "M5", "M6"]
             elif ".." in r.snapshot["period"]:
                 assert not games
+            elif r.snapshot["anchor"] == middle_event:
+                assert [g["opponent"] for g in games] == ["M1", "M2", "M3"]
             else:
                 assert len(games) == 6
     await svc.reports.process()
     files = [m.text for m in notifier.to(ADMIN_TG_ID)]
-    assert sum(name.endswith(".pdf") for name in files) == 6
+    assert sum(name.endswith(".pdf") for name in files) == 7
     assert sum(name.endswith(".csv") for name in files) == 1
     assert len(notifier.to(ADMIN_TG_ID)) >= 7
 

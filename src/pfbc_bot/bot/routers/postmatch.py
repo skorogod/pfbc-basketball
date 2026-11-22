@@ -40,10 +40,15 @@ async def send_options(message: Message, text: str, buttons: list[tuple[str, str
 @router.message(Command("postmatch"))
 async def menu(message: Message, services: Services, ctx: UserContext) -> None:
     items = await services.postmatch.list_surveys(ctx)
+    buttons = [
+        (f"Мой отчёт · {name}", f"psm:{sid}:period:{ctx.user.id}")
+        for sid, name in await services.postmatch.reports.own_surveys(ctx)
+    ]
+    buttons.extend((name, f"psm:{sid}:card") for sid, name in items)
     await send_options(
         message,
-        "Послематчевые опросы" if items else "Доступных опросов нет.",
-        [(name, f"psm:{sid}:card") for sid, name in items],
+        "Послематчевые опросы" if buttons else "Доступных опросов нет.",
+        buttons,
     )
 
 
@@ -91,16 +96,18 @@ async def manage(
     action = parts[2]
     uid = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
     service = services.postmatch
-    card, players = await service.card(ctx, sid)
+    card = ""
+    players: list[tuple[int, str, str]] = []
+    if action not in {"period", "csvperiod", "dates", "request", "players"}:
+        card, players = await service.card(ctx, sid)
     prefix = f"psm:{sid}:"
     buttons = []
     if action == "card":
         buttons = [
             ("Добавить игрока", "add"),
             ("Убрать из опроса", "remove"),
-            ("Отчёт за матч", "preview"),
-            ("История команды", "period:0"),
-            ("История игрока", "players"),
+            ("Отчёт команды", "period:0"),
+            ("Отчёт игрока", "players"),
         ]
         if ctx.is_admin:
             buttons.extend(
@@ -110,9 +117,12 @@ async def manage(
                     ("Удаление данных игрока", "erase"),
                 ]
             )
-    elif action in ("add", "remove", "players", "erase", "resend"):
+    elif action == "players":
+        names = player_labels(await service.reports.report_players(ctx, sid))
+        card = "Выберите игрока" if names else "За этот период участников нет."
+        buttons = [(f"{name} · {pid}", f"period:{pid}") for pid, name in names.items()]
+    elif action in ("add", "remove", "erase", "resend"):
         card = "Выберите игрока"
-        labels = player_labels({user_id: name for user_id, name, _ in players})
         for pid, name, status in players:
             if action == "add" and status not in ("new", "removed"):
                 continue
@@ -124,11 +134,8 @@ async def manage(
                 "resend": "send_again",
                 "add": "join",
                 "remove": "drop",
-                "players": "period",
                 "erase": "confirm_erase",
             }[action]
-            if action == "players":
-                name = labels[pid]
             buttons.append((f"{name} · {pid}", f"{op}:{pid}"))
     elif action == "send_again":
         await service.resend(ctx, sid, uid)

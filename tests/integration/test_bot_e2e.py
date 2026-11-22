@@ -1457,7 +1457,13 @@ async def test_postmatch_invitation_and_decline(
     assert "Ответили 0 из 0" in harness.session.texts_to(ADMIN_TG_ID)[-1]
     await harness.press(ADMIN_TG_ID, f"psm:{survey.id}:request:0:match:docx")
     assert "Отчёт готовится" in harness.session.texts_to(ADMIN_TG_ID)[-1]
+    await harness.private(PLAYER, "/postmatch")
+    await harness.press(PLAYER, f"psm:{survey.id}:period:{player.user.id}")
+    assert "Период" in harness.session.texts_to(PLAYER)[-1]
+    await harness.press(PLAYER, f"psm:{survey.id}:request:{player.user.id}:5:pdf")
+    assert "Отчёт готовится" in harness.session.texts_to(PLAYER)[-1]
     services.postmatch.reports.directory = tmp_path
     await services.postmatch.reports.process()
     path = Path(notifier.to(ADMIN_TG_ID)[-1].text)
     assert path.suffix == ".pdf" and (await asyncio.to_thread(path.read_bytes)).startswith(b"%PDF-")
+    assert notifier.to(PLAYER)[-1].text.endswith(".pdf")

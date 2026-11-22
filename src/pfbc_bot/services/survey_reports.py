@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from reportlab.platypus.doctemplate import LayoutError
-from sqlalchemy import func, select, text
+from sqlalchemy import func, literal, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import aliased
 
@@ -25,7 +25,6 @@ from pfbc_bot.db.models import (
 )
 from pfbc_bot.domain.dates import format_local, to_local, utcnow
 from pfbc_bot.domain.enums import EventType, MembershipStatus, SquadRole, TopicPurpose
-from pfbc_bot.domain.postmatch import player_labels
 from pfbc_bot.repositories.uow import UnitOfWork, UowFactory
 from pfbc_bot.scheduler.locks import lock_key
 from pfbc_bot.schemas.squads import UserContext
@@ -33,7 +32,7 @@ from pfbc_bot.services.common import resolve_destination, to_dto
 from pfbc_bot.services.errors import Conflict, PermissionDenied
 from pfbc_bot.services.ports import Notifier
 from pfbc_bot.services.settings import load_squad_settings
-from pfbc_bot.services.survey_documents import render_report, summarize
+from pfbc_bot.services.survey_documents import make_snapshot, render_report, summarize
 
 
 async def survey_rows(uow: UnitOfWork, survey_id: int) -> list[tuple[SurveyPlayer, User]]:
@@ -47,14 +46,12 @@ async def survey_rows(uow: UnitOfWork, survey_id: int) -> list[tuple[SurveyPlaye
 
 
 async def game_snapshot(
-    uow: UnitOfWork, survey: MatchSurvey | None, event: Event, squad: Squad, visibility: str
+    uow: UnitOfWork, survey: MatchSurvey | None, event: Event, squad: Squad
 ) -> dict[str, Any]:
     source = await uow.session.get(Match, event.match_id) if event.match_id else None
     rows = []
     for p, user in await survey_rows(uow, survey.id) if survey else []:
         answers = p.answers if p.status == "submitted" else {}
-        if visibility != "sensitive":
-            answers = {k: v for k, v in answers.items() if k in {"1", "4", "5", "6"}}
         rows.append(
             {
                 "id": p.user_id,
@@ -70,7 +67,7 @@ async def game_snapshot(
         "date": to_local(event.starts_at, squad.timezone).strftime("%d.%m.%Y"),
         "opponent": event.opponent or (source.opponent if source else event.title),
         "final": bool(survey and survey.status == "closed"),
-        "rows": rows if visibility != "group" else [],
+        "rows": rows,
         "stats": summarize(rows),
     }
 
@@ -89,37 +86,19 @@ class SurveyReports:
         self,
         uow: UnitOfWork,
         squad: Squad,
-        games: list[dict[str, Any]],
-        visibility: str,
+        snapshot: dict[str, Any],
         kind: str,
         chat: int,
         automatic: bool,
-        *,
-        player: int = 0,
-        history: bool = False,
-        player_name: str = "",
-        period: str = "match",
     ) -> bool:
-        snapshot = {
-            "games": games,
-            "visibility": visibility,
-            "player": player,
-            "history": history,
-            "period": period,
-            "player_name": player_name,
-            "title": (
-                "История матчей · " + (player_name or squad.name)
-                if history
-                else "Сводная таблица по матчу"
-            ),
-        }
+        visibility = snapshot["visibility"]
         scope = [
             squad.id,
             kind,
             visibility,
-            player,
-            period,
-            games[0]["event"] if not history else None,
+            snapshot["player"],
+            snapshot["period"],
+            snapshot["anchor"],
         ]
         family = hashlib.sha256(json.dumps(scope).encode()).hexdigest()
         key = hashlib.sha256(
@@ -166,28 +145,127 @@ class SurveyReports:
         )
         return report.ready
 
+    async def _games(
+        self,
+        uow: UnitOfWork,
+        squad: Squad,
+        anchor: Event,
+        period: str,
+        player: int,
+        *,
+        lock_surveys: bool = True,
+    ) -> list[dict[str, Any]]:
+        assert anchor.starts_at
+        query = (
+            select(MatchSurvey, Event)
+            .select_from(Event)
+            .outerjoin(MatchSurvey, MatchSurvey.event_id == Event.id)
+            .where(
+                Event.squad_id == squad.id,
+                Event.deleted_at.is_(None),
+                Event.type == EventType.MATCH,
+                (Event.id == anchor.id)
+                | (
+                    Event.starts_at + Event.duration_minutes * text("interval '1 minute'")
+                    <= utcnow()
+                ),
+                tuple_(Event.starts_at, Event.id)
+                <= tuple_(literal(anchor.starts_at), literal(anchor.id)),
+            )
+            .order_by(Event.starts_at.desc(), Event.id.desc())
+        )
+        if player:
+            query = query.join(SurveyPlayer, SurveyPlayer.survey_id == MatchSurvey.id).where(
+                SurveyPlayer.user_id == player, SurveyPlayer.status.not_in(["absent", "removed"])
+            )
+        if period == "match":
+            query = query.where(Event.id == anchor.id)
+        elif period in ("5", "10", "20"):
+            query = query.limit(int(period))
+        elif period != "all":
+            try:
+                first, last = (date.fromisoformat(d) for d in period.split(".."))
+                if first > last:
+                    raise ValueError
+            except ValueError as exc:
+                raise Conflict("Введите период ГГГГ-ММ-ДД..ГГГГ-ММ-ДД.") from exc
+            query = query.where(
+                func.date(func.timezone(squad.timezone, Event.starts_at)).between(first, last)
+            )
+        items = list((await uow.session.execute(query)).all())[::-1]
+        if lock_surveys:
+            await uow.session.execute(
+                select(MatchSurvey.id)
+                .where(MatchSurvey.id.in_([survey.id for survey, _ in items if survey]))
+                .order_by(MatchSurvey.id)
+                .with_for_update(read=True)
+            )
+        return [await game_snapshot(uow, survey, event, squad) for survey, event in items]
+
     async def final(self, uow: UnitOfWork, survey: MatchSurvey, event: Event, squad: Squad) -> None:
+        games = await self._games(uow, squad, event, "5", 0)
         dest = await resolve_destination(uow, squad.id, TopicPurpose.MATCH_ANALYSIS)
         if dest:
-            game = await game_snapshot(uow, survey, event, squad, "group")
-            await self._queue(uow, squad, [game], "group", "pdf", dest.chat_id, True)
+            snapshot = make_snapshot(games, "group", squad.name, event.id)
+            await self._queue(uow, squad, snapshot, "pdf", dest.chat_id, True)
         roles = await uow.members.roles_in_squad(squad.id)
-        sensitive = (await load_squad_settings(uow, squad.id)).survey_sensitive_users
-        versions = {}
+        staff = make_snapshot(games, "staff", squad.name, event.id)
         for _, user in await uow.members.list_active_for_squad(squad.id):
             if (
                 user.is_admin
                 or user.tg_user_id in self.admins
                 or SquadRole.COACH in roles.get(user.id, set())
             ):
-                visibility = "sensitive" if user.id in sensitive else "staff"
-                if visibility not in versions:
-                    versions[visibility] = await game_snapshot(
-                        uow, survey, event, squad, visibility
-                    )
-                await self._queue(
-                    uow, squad, [versions[visibility]], visibility, "pdf", user.tg_user_id, True
+                await self._queue(uow, squad, staff, "pdf", user.tg_user_id, True)
+
+    async def own_surveys(self, ctx: UserContext) -> list[tuple[int, str]]:
+        async with self.factory() as uow:
+            query = (
+                select(MatchSurvey.id, Squad.name)
+                .select_from(MatchSurvey)
+                .join(Event, Event.id == MatchSurvey.event_id)
+                .join(Squad, Squad.id == Event.squad_id)
+                .join(SurveyPlayer, SurveyPlayer.survey_id == MatchSurvey.id)
+                .where(
+                    Event.deleted_at.is_(None),
+                    Event.squad_id.in_(ctx.squad_ids),
+                    SurveyPlayer.user_id == ctx.user.id,
+                    SurveyPlayer.status.not_in(["absent", "removed"]),
                 )
+                .distinct(Squad.id)
+                .order_by(Squad.id, Event.starts_at.desc(), Event.id.desc())
+            )
+            return [(sid, name) for sid, name in await uow.session.execute(query)]
+
+    async def report_players(self, ctx: UserContext, sid: int) -> dict[int, str]:
+        async with self.factory() as uow:
+            anchor = await uow.session.scalar(
+                select(Event)
+                .join(MatchSurvey)
+                .where(MatchSurvey.id == sid, Event.deleted_at.is_(None))
+            )
+            if (
+                not anchor
+                or not anchor.starts_at
+                or not ctx.has_role(anchor.squad_id, SquadRole.COACH)
+            ):
+                raise PermissionDenied("Нет доступа к отчёту.")
+            eligible = (
+                select(SurveyPlayer.user_id)
+                .join(MatchSurvey, MatchSurvey.id == SurveyPlayer.survey_id)
+                .join(Event, Event.id == MatchSurvey.event_id)
+                .where(
+                    Event.squad_id == anchor.squad_id,
+                    Event.deleted_at.is_(None),
+                    tuple_(Event.starts_at, Event.id)
+                    <= tuple_(literal(anchor.starts_at), literal(anchor.id)),
+                    SurveyPlayer.status.not_in(["absent", "removed"]),
+                )
+            )
+            users = await uow.session.scalars(
+                select(User).where(User.id.in_(eligible)).order_by(User.full_name, User.id)
+            )
+            return {user.id: to_dto(user).display_name for user in users}
 
     async def request(
         self,
@@ -199,105 +277,62 @@ class SurveyReports:
         kind: str = "pdf",
     ) -> str:
         async with self.factory() as uow:
-            survey = await uow.session.get(
-                MatchSurvey, survey_id, with_for_update=period == "match"
-            )
+            survey = await uow.session.get(MatchSurvey, survey_id)
             event = await uow.session.get(Event, survey.event_id) if survey else None
-            if not event or event.deleted_at or not ctx.has_role(event.squad_id, SquadRole.COACH):
+            if not event or event.deleted_at:
                 raise PermissionDenied("Нет доступа к отчёту.")
-            if kind == "docx":  # Кнопки и состояния диалогов до перехода на PDF.
+            own = player == ctx.user.id and event.squad_id in ctx.squad_ids
+            if not own and not ctx.has_role(event.squad_id, SquadRole.COACH):
+                raise PermissionDenied("Нет доступа к отчёту.")
+            if kind == "docx":
                 kind = "pdf"
             if kind not in {"pdf", "csv"} or (kind == "csv" and not ctx.is_admin):
                 raise PermissionDenied("Нет доступа к этому формату.")
             squad = await uow.session.get(Squad, event.squad_id)
-            assert squad and survey
-            settings = await load_squad_settings(uow, squad.id)
-            visibility = "sensitive" if ctx.user.id in settings.survey_sensitive_users else "staff"
-            history = period != "match"
-            player_name = ""
-            if history:
-                query = (
-                    select(MatchSurvey, Event)
-                    .select_from(Event)
-                    .outerjoin(MatchSurvey, MatchSurvey.event_id == Event.id)
-                    .where(
-                        Event.squad_id == squad.id,
-                        Event.deleted_at.is_(None),
-                        Event.type == EventType.MATCH,
-                        Event.starts_at + Event.duration_minutes * text("interval '1 minute'")
-                        <= utcnow(),
-                    )
-                )
-                if player:
-                    query = query.join(
-                        SurveyPlayer, SurveyPlayer.survey_id == MatchSurvey.id
-                    ).where(
-                        SurveyPlayer.user_id == player,
-                        SurveyPlayer.status.not_in(["absent", "removed"]),
-                    )
-                    if await uow.members.get(player, squad.id) is None:
-                        raise PermissionDenied("Игрок не состоит в выбранном составе.")
-                    user = await uow.session.get(User, player)
-                    assert user
-                    names = {
-                        u.id: to_dto(u).display_name
-                        for _, u in await uow.members.list_active_for_squad(squad.id)
-                    }
-                    names[player] = to_dto(user).display_name
-                    player_name = player_labels(names)[player]
-                bounds = None
-                if period not in ("5", "10", "20", "all"):
-                    try:
-                        start, end = period.split("..")
-                        bounds = (date.fromisoformat(start), date.fromisoformat(end))
-                        if bounds[0] > bounds[1]:
-                            raise ValueError
-                    except ValueError as exc:
-                        raise Conflict("Введите период ГГГГ-ММ-ДД..ГГГГ-ММ-ДД.") from exc
-                query = query.order_by(Event.starts_at.desc(), Event.id.desc())
-                if period.isdigit():
-                    query = query.limit(int(period))
-                items = list((await uow.session.execute(query)).all())[::-1]
-                # Одинаковый порядок блокировок с удалением данных. Снимок всех матчей
-                # собирается после фиксации конкурирующих изменений участников.
-                await uow.session.execute(
-                    select(MatchSurvey)
-                    .where(MatchSurvey.id.in_([s.id for s, _ in items if s]))
-                    .order_by(MatchSurvey.id)
-                    .with_for_update(read=True)
-                    .execution_options(populate_existing=True)
-                )
-                games = []
-                for s, e in items:
-                    if (
-                        bounds
-                        and not bounds[0]
-                        <= to_local(e.starts_at, squad.timezone).date()
-                        <= bounds[1]
-                    ):
-                        continue
-                    games.append(await game_snapshot(uow, s, e, squad, visibility))
-            else:
-                games = [await game_snapshot(uow, survey, event, squad, visibility)]
-            ready = await self._queue(
-                uow,
-                squad,
-                games,
-                visibility,
-                kind,
-                ctx.user.tg_user_id,
-                False,
-                player=player,
-                history=history,
-                player_name=player_name,
-                period=period,
+            assert squad
+            name = ""
+            if player:
+                user = await uow.session.get(User, player)
+                if not user or not await uow.members.get(player, squad.id):
+                    raise PermissionDenied("Игрок не состоит в выбранном составе.")
+                name = to_dto(user).display_name
+            if period == "match" and kind == "pdf":
+                period = "5"
+            games = await self._games(uow, squad, event, period, player)
+            snapshot = make_snapshot(
+                games, "player" if player else "staff", squad.name, event.id, period, player, name
             )
+            ready = await self._queue(uow, squad, snapshot, kind, ctx.user.tg_user_id, False)
             await uow.commit()
             return (
                 "Отчёт готов, отправляю."
                 if ready
                 else "Отчёт готовится. Пришлю его сюда, когда он будет готов."
             )
+
+    async def _refresh_legacy(self, uow: UnitOfWork, report: SurveyReport) -> None:
+        old = report.snapshot
+        squad = await uow.session.get(Squad, report.squad_id)
+        assert squad
+        player = old["player"]
+        period = old["period"]
+        if report.kind == "pdf" and period == "match":
+            period = "5"
+        anchor_id = old["games"][-1]["event"] if old["games"] else 0
+        anchor = await uow.session.get(Event, anchor_id) if anchor_id else None
+        # Удаление анкет блокирует сначала опросы, затем отчёты. Здесь отчёт уже
+        # заблокирован: удаление проверит обновлённый снимок перед своей фиксацией.
+        games = (
+            await self._games(uow, squad, anchor, period, player, lock_surveys=False)
+            if anchor and not anchor.deleted_at
+            else []
+        )
+        visibility = "group" if report.visibility == "group" else ("player" if player else "staff")
+        report.snapshot = make_snapshot(
+            games, visibility, squad.name, anchor_id, period, player, old["player_name"]
+        )
+        report.visibility = visibility
+        report.ready = False
 
     async def process(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -359,6 +394,9 @@ class SurveyReports:
                 return
             if not pending:
                 return
+            if "layout" not in report.snapshot:
+                await self._refresh_legacy(uow, report)
+                await uow.commit()
             needs_build = not report.ready or not path.is_file()
         if needs_build and not await self._build(rid):
             return
@@ -454,9 +492,8 @@ class SurveyReports:
                 )
                 if report.kind == "csv":
                     allowed = allowed and admin
-                if report.visibility == "sensitive":
-                    settings = await load_squad_settings(uow, report.squad_id)
-                    allowed = bool(allowed and user and user.id in settings.survey_sensitive_users)
+                if report.kind == "pdf" and report.visibility == "player" and active and user:
+                    allowed = allowed or user.id == report.snapshot["player"]
             if not allowed:
                 delivery.status = "revoked"
             else:
