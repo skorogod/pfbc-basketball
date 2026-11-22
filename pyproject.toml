@@ -16,7 +16,7 @@ dependencies = [
     "pydantic-settings>=2.3",
     "apscheduler>=3.10,<4",
     "structlog>=24.1",
-    "python-docx>=1.2,<2",
+    "reportlab>=4.5,<5",
     "matplotlib>=3.9,<4",
     "tzdata>=2024.1",
 ]
@@ -24,6 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
+    "pypdf>=6,<7",
     "pytest-asyncio>=0.23",
     "testcontainers[postgres]>=4.5",
     "ruff>=0.5",
@@ -51,7 +52,7 @@ mypy_path = "src"
 packages = ["pfbc_bot"]
 
 [[tool.mypy.overrides]]
-module = ["apscheduler.*", "testcontainers.*"]
+module = ["apscheduler.*", "reportlab.*", "testcontainers.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

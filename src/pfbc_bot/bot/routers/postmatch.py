@@ -141,12 +141,12 @@ async def manage(
         buttons = [
             (
                 "Подтвердить формирование",
-                "request:0:match:" + ("csv" if action == "csvpreview" else "docx"),
+                "request:0:match:" + ("csv" if action == "csvpreview" else "pdf"),
             )
         ]
     elif action in ("period", "csvperiod"):
         card = "Период истории (по умолчанию — последние 5 матчей)"
-        kind = "csv" if action == "csvperiod" else "docx"
+        kind = "csv" if action == "csvperiod" else "pdf"
         buttons = [
             (label, f"request:{uid}:{period}:{kind}")
             for label, period in (
@@ -157,11 +157,11 @@ async def manage(
             )
         ]
         buttons.append(("Диапазон дат", f"dates:{uid}:{kind}"))
-        if ctx.is_admin and kind == "docx":
+        if ctx.is_admin and kind == "pdf":
             buttons.append(("Экспорт истории в CSV", f"csvperiod:{uid}"))
     elif action == "dates":
         await state.set_state(SurveyInput.dates)
-        await state.update_data(sid=sid, uid=uid, kind=parts[4] if len(parts) == 5 else "docx")
+        await state.update_data(sid=sid, uid=uid, kind=parts[4] if len(parts) == 5 else "pdf")
         card = "Введите даты в формате ГГГГ-ММ-ДД..ГГГГ-ММ-ДД."
     elif action == "request" and len(parts) == 6:
         card = await service.reports.request(ctx, sid, period=parts[4], player=uid, kind=parts[5])

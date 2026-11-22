@@ -3,13 +3,20 @@
 import csv
 import io
 from collections import Counter, defaultdict
+from pathlib import Path
 from statistics import mean
 from typing import Any
+from xml.sax.saxutils import escape
 
-from docx import Document
-from docx.shared import Inches
+from matplotlib import get_data_path
 from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import Flowable, Image, LongTable, Paragraph, SimpleDocTemplate, TableStyle
 
 from pfbc_bot.domain.postmatch import EXCLUDED, OPTIONS, STATUS, answer_label
 
@@ -34,11 +41,65 @@ def summarize(rows: list[Row]) -> Row:
     }
 
 
-def _figure(doc: Any, figure: Figure) -> None:
+_FONTS = Path(get_data_path()) / "fonts" / "ttf"
+for _name in ("DejaVuSans", "DejaVuSans-Bold"):
+    pdfmetrics.registerFont(TTFont(_name, str(_FONTS / f"{_name}.ttf")))
+
+_BODY = ParagraphStyle("body", fontName="DejaVuSans", fontSize=10, leading=14, spaceAfter=5)
+_CELL = ParagraphStyle("cell", parent=_BODY, fontSize=8, leading=10, spaceAfter=0)
+_HEADER = ParagraphStyle("header", parent=_CELL, fontName="DejaVuSans-Bold")
+_HEADINGS = [
+    ParagraphStyle(
+        f"heading-{size}",
+        parent=_BODY,
+        fontName="DejaVuSans-Bold",
+        fontSize=size,
+        leading=size + 4,
+        spaceBefore=6,
+        keepWithNext=True,
+    )
+    for size in (19, 15, 12)
+]
+_WIDTH = A4[0] - 84  # 36 pt margins plus the default 6 pt frame padding on each side.
+
+
+def _paragraph(value: str, style: ParagraphStyle = _BODY) -> Paragraph:
+    return Paragraph("<br/>".join(escape(value).splitlines()), style)
+
+
+def _table(doc: list[Flowable], rows: list[list[str]], widths: list[int]) -> None:
+    data = [
+        [_paragraph(v, _HEADER if i == 0 else _CELL) for v in row] for i, row in enumerate(rows)
+    ]
+    table = LongTable(
+        data,
+        colWidths=[_WIDTH * w / sum(widths) for w in widths],
+        repeatRows=1,
+        splitInRow=1,
+        spaceAfter=8,
+    )
+    table.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dcebf1")),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.lightgrey),
+                ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+            ]
+        )
+    )
+    doc.append(table)
+
+
+def _figure(doc: list[Flowable], figure: Figure) -> None:
     buf = io.BytesIO()
     figure.savefig(buf, format="png", dpi=130, bbox_inches="tight")
     buf.seek(0)
-    doc.add_picture(buf, width=Inches(6))
+    image = Image(buf)
+    image.drawWidth = min(_WIDTH, 432)
+    image.drawHeight = image.drawWidth * image.imageHeight / image.imageWidth
+    doc.append(image)
     figure.clear()
 
 
@@ -83,41 +144,52 @@ def render_report(snapshot: Row, kind: str, as_of: str) -> bytes:
                     ]
                 )
         return stream.getvalue().encode("utf-8-sig")
-    doc = Document()
-    doc.add_heading(snapshot["title"], 0)
-    doc.add_paragraph("Данные на " + as_of)
+    if kind != "pdf":
+        raise ValueError(f"Неизвестный формат отчёта: {kind}")
+    doc: list[Flowable] = []
+    doc.append(_paragraph(snapshot["title"], _HEADINGS[0]))
+    doc.append(_paragraph("Данные на " + as_of))
     if not games:
-        doc.add_paragraph("За выбранный период матчей нет.")
+        doc.append(_paragraph("За выбранный период матчей нет."))
     if snapshot["history"] and games:
         _history(doc, snapshot)
     else:
         for game in games:
             _match(doc, game, snapshot["visibility"])
     output = io.BytesIO()
-    doc.save(output)
+    SimpleDocTemplate(
+        output,
+        pagesize=A4,
+        leftMargin=36,
+        rightMargin=36,
+        topMargin=32,
+        bottomMargin=32,
+        title=snapshot["title"],
+    ).build(doc)
     return output.getvalue()
 
 
-def _match(doc: Any, game: Row, visibility: str) -> None:
-    doc.add_heading(f"{game['date']} · {game['squad']} против {game['opponent']}", 1)
+def _match(doc: list[Flowable], game: Row, visibility: str) -> None:
+    doc.append(
+        _paragraph(f"{game['date']} · {game['squad']} против {game['opponent']}", _HEADINGS[1])
+    )
     stats = game["stats"]
     ratio = f"Ответили {stats['n']} из {stats['total']}"
-    doc.add_paragraph(
-        f"{ratio}. Не участвовали в матче: {stats['absent']}. "
-        f"Не будут проходить опрос: {stats['declined']}."
+    doc.append(
+        _paragraph(
+            f"{ratio}. Не участвовали в матче: {stats['absent']}. "
+            f"Не будут проходить опрос: {stats['declined']}."
+        )
     )
     if visibility != "group":
         columns = ["ФИО", "Статус", "Нагрузка", "Самооценка", "Индивидуально", "Командно"]
         fields = [1, 4, 5, 6]
         if visibility == "sensitive":
-            columns += ["Состояние", "Боль", "Комментарий"]
-            fields += [2, 3, 7]
-        table = doc.add_table(rows=0, cols=len(columns))
-        table.style = "Table Grid"
-        _row(table, columns)
+            columns += ["Состояние", "Боль"]
+            fields += [2, 3]
+        rows = [columns]
         for row in game["rows"]:
-            _row(
-                table,
+            rows.append(
                 [
                     row["name"],
                     STATUS[row["status"]],
@@ -127,11 +199,21 @@ def _match(doc: Any, game: Row, visibility: str) -> None:
                     ),
                 ],
             )
+        widths = [15, 13, 9, 12, 18, 18] + ([12, 14] if visibility == "sensitive" else [])
+        _table(doc, rows, widths)
+        if visibility == "sensitive":
+            comments = [
+                r for r in game["rows"] if r["status"] == "submitted" and r["answers"].get("7")
+            ]
+            if comments:
+                doc.append(_paragraph("Комментарии", _HEADINGS[2]))
+                for row in comments:
+                    doc.append(_paragraph(f"{row['name']} — {answer_label(7, row['answers'])}"))
     for score, title, limit in (("1", "Нагрузка", 10), ("4", "Самооценка", 5)):
-        doc.add_heading(title, 2)
+        doc.append(_paragraph(title, _HEADINGS[2]))
         values = stats["scores"][score]
         if not values:
-            doc.add_paragraph("Нет данных · " + ratio)
+            doc.append(_paragraph("Нет данных · " + ratio))
             continue
         fig = Figure(figsize=(6, 2.5), layout="constrained")
         ax = fig.subplots()
@@ -140,33 +222,27 @@ def _match(doc: Any, game: Row, visibility: str) -> None:
         ax.set(xticks=scale, ylabel="Игроки", xlabel="Оценка", ylim=(0, None))
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
         _figure(doc, fig)
-        doc.add_paragraph(f"Среднее {mean(values):.1f} из {limit} · {ratio}".replace(".", ","))
-    doc.add_heading("Запросы на тренировку", 2)
+        doc.append(_paragraph(f"Среднее {mean(values):.1f} из {limit} · {ratio}".replace(".", ",")))
+    doc.append(_paragraph("Запросы на тренировку", _HEADINGS[2]))
     for q, title in ((5, "Индивидуально"), (6, "Командно")):
-        doc.add_paragraph(
-            title
-            + ": "
-            + ", ".join(
-                f"{label} — {stats['skills'][str(q)].get(code, 0)}"
-                for code, label in OPTIONS[q].items()
+        doc.append(
+            _paragraph(
+                title
+                + ": "
+                + ", ".join(
+                    f"{label} — {stats['skills'][str(q)].get(code, 0)}"
+                    for code, label in OPTIONS[q].items()
+                )
             )
         )
 
 
-def _row(table: Any, values: list[str]) -> None:
-    for cell, value in zip(table.add_row().cells, values, strict=True):
-        cell.text = value
-
-
-def _history(doc: Any, snapshot: Row) -> None:
+def _history(doc: list[Flowable], snapshot: Row) -> None:
     games = snapshot["games"]
     target = snapshot["player"]
     skills: dict[tuple[int, str], set[int]] = defaultdict(set)
     player_skills: Counter[tuple[int, str]] = Counter()
-    table = doc.add_table(rows=0, cols=6)
-    table.style = "Table Grid"
-    _row(
-        table,
+    rows = [
         [
             "Дата · соперник",
             "Ответили",
@@ -175,7 +251,7 @@ def _history(doc: Any, snapshot: Row) -> None:
             "Оценки игрока",
             "Запросы игрока",
         ],
-    )
+    ]
     series: dict[int, list[float]] = {1: [], 4: []}
     personal: dict[int, list[float]] = {1: [], 4: []}
     for g in games:
@@ -197,8 +273,7 @@ def _history(doc: Any, snapshot: Row) -> None:
                             player_skills[q, code] += 1
         for q in (1, 4):
             personal[q].append(float(own.get(str(q), "nan")))
-        _row(
-            table,
+        rows.append(
             [
                 g["date"] + " · " + g["opponent"],
                 f"{stats['n']} из {stats['total']}",
@@ -207,6 +282,7 @@ def _history(doc: Any, snapshot: Row) -> None:
                 " / ".join(answer_label(q, own) for q in (5, 6)) if own else "—",
             ],
         )
+    _table(doc, rows, [21, 11, 15, 17, 13, 23])
     for q, label, limit in ((1, "Нагрузка", 10), (4, "Самооценка", 5)):
         # Длинную историю делим на читаемые панели.
         for i in range(0, len(games), 10):
@@ -223,10 +299,12 @@ def _history(doc: Any, snapshot: Row) -> None:
             )
             ax.legend()
             _figure(doc, fig)
-    doc.add_heading("Запросы за период", 2)
+    doc.append(_paragraph("Запросы за период", _HEADINGS[2]))
     responders = {r["id"] for g in games for r in g["rows"] if r["status"] == "submitted"}
-    doc.add_paragraph(
-        f"{games[0]['date']} — {games[-1]['date']}. Ответили игроков: {len(responders)}."
+    doc.append(
+        _paragraph(
+            f"{games[0]['date']} — {games[-1]['date']}. Ответили игроков: {len(responders)}."
+        )
     )
     for q, label in ((5, "Индивидуально"), (6, "Командно")):
         fig = Figure(figsize=(6, 3), layout="constrained")

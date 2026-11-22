@@ -8,6 +8,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from reportlab.platypus.doctemplate import LayoutError
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import aliased
@@ -169,7 +170,7 @@ class SurveyReports:
         dest = await resolve_destination(uow, squad.id, TopicPurpose.MATCH_ANALYSIS)
         if dest:
             game = await game_snapshot(uow, survey, event, squad, "group")
-            await self._queue(uow, squad, [game], "group", "docx", dest.chat_id, True)
+            await self._queue(uow, squad, [game], "group", "pdf", dest.chat_id, True)
         roles = await uow.members.roles_in_squad(squad.id)
         sensitive = (await load_squad_settings(uow, squad.id)).survey_sensitive_users
         versions = {}
@@ -185,7 +186,7 @@ class SurveyReports:
                         uow, survey, event, squad, visibility
                     )
                 await self._queue(
-                    uow, squad, [versions[visibility]], visibility, "docx", user.tg_user_id, True
+                    uow, squad, [versions[visibility]], visibility, "pdf", user.tg_user_id, True
                 )
 
     async def request(
@@ -195,7 +196,7 @@ class SurveyReports:
         *,
         period: str = "match",
         player: int = 0,
-        kind: str = "docx",
+        kind: str = "pdf",
     ) -> str:
         async with self.factory() as uow:
             survey = await uow.session.get(
@@ -204,7 +205,9 @@ class SurveyReports:
             event = await uow.session.get(Event, survey.event_id) if survey else None
             if not event or event.deleted_at or not ctx.has_role(event.squad_id, SquadRole.COACH):
                 raise PermissionDenied("Нет доступа к отчёту.")
-            if kind not in {"docx", "csv"} or (kind == "csv" and not ctx.is_admin):
+            if kind == "docx":  # Кнопки и состояния диалогов до перехода на PDF.
+                kind = "pdf"
+            if kind not in {"pdf", "csv"} or (kind == "csv" and not ctx.is_admin):
                 raise PermissionDenied("Нет доступа к этому формату.")
             squad = await uow.session.get(Squad, event.squad_id)
             assert squad and survey
@@ -400,7 +403,7 @@ class SurveyReports:
                 temp.write_bytes(data)
                 temp.replace(path)
                 current.ready = True
-            except (OSError, ValueError, RuntimeError, TypeError, KeyError):
+            except (OSError, ValueError, RuntimeError, TypeError, KeyError, LayoutError):
                 current = await guard.session.get(
                     SurveyReport, rid, with_for_update=True, populate_existing=True
                 )

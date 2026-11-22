@@ -5,7 +5,10 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from docx import Document
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from alembic.script import ScriptDirectory
+from pypdf import PdfReader
 from sqlalchemy import func, select
 
 from pfbc_bot.db.models import Event, MatchSurvey, ReportRecipient, SurveyPlayer, SurveyReport
@@ -121,9 +124,9 @@ async def test_survey_lifecycle(
                 assert not game["rows"]
     await svc.reports.process()
     assert notifier.to(CHAT_ID)[-1].thread_id == 44
-    doc = Document(notifier.to(CHAT_ID)[-1].text)
-    assert len(doc.inline_shapes) == 2
-    assert not doc.tables
+    doc = PdfReader(notifier.to(CHAT_ID)[-1].text)
+    assert sum(len(page.images) for page in doc.pages) == 2
+    assert all("ФИО" not in page.extract_text() for page in doc.pages)
     assert "готов, отправляю" in await svc.reports.request(coach, sid)
     await svc.reports.process()
     assert len([m for m in notifier.to(CHAT_ID) if m.thread_id == 44]) == 1
@@ -210,9 +213,9 @@ async def test_schedule_reminder_and_deadline(
         s = await uow.session.get(MatchSurvey, sid)
         assert s and s.reason == "deadline" and (s.responses, s.participants) == (0, 1)
     await svc.reports.process()
-    doc = Document(notifier.to(CHAT_ID)[-1].text)
-    assert len(doc.inline_shapes) == 0
-    assert any("Нет данных · Ответили 0 из 1" in p.text for p in doc.paragraphs)
+    doc = PdfReader(notifier.to(CHAT_ID)[-1].text)
+    assert sum(len(page.images) for page in doc.pages) == 0
+    assert any("Нет данных · Ответили 0 из 1" in page.extract_text() for page in doc.pages)
 
 
 async def test_history_periods_and_player_comparison(
@@ -279,6 +282,84 @@ async def test_history_periods_and_player_comparison(
                 assert len(games) == 6
     await svc.reports.process()
     files = [m.text for m in notifier.to(ADMIN_TG_ID)]
-    assert sum(name.endswith(".docx") for name in files) == 6
+    assert sum(name.endswith(".pdf") for name in files) == 6
     assert sum(name.endswith(".csv") for name in files) == 1
     assert len(notifier.to(ADMIN_TG_ID)) >= 7
+
+
+async def test_migrate_partial_docx_delivery(
+    services: Services, uow_factory: UowFactory, notifier: FakeNotifier, tmp_path: Path
+) -> None:
+    squad = await setup_squad(services)
+    reports = services.postmatch.reports
+    reports.directory = tmp_path
+    coach_chat = 77
+    await join(services, coach_chat, at=utcnow(), role=SquadRole.COACH)
+    async with uow_factory() as uow:
+        old = SurveyReport(
+            family="legacy",
+            key="legacy",
+            kind="docx",
+            visibility="staff",
+            squad_id=squad.id,
+            snapshot={
+                "title": "История матчей",
+                "games": [],
+                "history": True,
+                "period": "5",
+                "player": 0,
+                "visibility": "staff",
+                "player_name": "",
+            },
+            created_at=utcnow(),
+            expires_at=utcnow() + timedelta(days=1),
+            ready=True,
+        )
+        uow.session.add(old)
+        await uow.session.flush()
+        for chat, status, automatic in [
+            (76, "sent", True),
+            (ADMIN_TG_ID, "pending", False),
+            (coach_chat, "pending", True),
+        ]:
+            uow.session.add(
+                ReportRecipient(
+                    report_id=old.id, chat_id=chat, automatic=automatic, status=status, attempts=1
+                )
+            )
+        reports.path(old).write_bytes(b"legacy")
+        await uow.session.flush()
+
+        def migrate(conn):
+            scripts = ScriptDirectory("migrations")
+            with Operations.context(MigrationContext.configure(conn)):
+                scripts.get_revision("0020").module.upgrade()
+
+        conn = await uow.session.connection()
+        await conn.run_sync(migrate)
+        await conn.run_sync(migrate)
+        pdf = (
+            await uow.session.scalars(select(SurveyReport).where(SurveyReport.kind == "pdf"))
+        ).one()
+        assert pdf.snapshot == old.snapshot
+        pending = await uow.session.scalars(
+            select(ReportRecipient).where(ReportRecipient.report_id == pdf.id)
+        )
+        assert {(r.chat_id, r.automatic, r.attempts) for r in pending} == {
+            (ADMIN_TG_ID, False, 1),
+            (coach_chat, True, 1),
+        }
+        await uow.commit()
+
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach = await ctx_of(services, coach_chat)
+    await services.squads.set_role(admin, squad.id, coach.user.id, SquadRole.COACH, grant=False)
+    await reports.process()
+    await reports.process()
+    assert [m.text for m in notifier.to(ADMIN_TG_ID) if m.text.endswith(".pdf")] == [
+        str(reports.path(pdf))
+    ]
+    assert not any(
+        m.text.endswith((".docx", ".pdf")) for chat in (76, coach_chat) for m in notifier.to(chat)
+    )
+    assert reports.path(old).is_file()
