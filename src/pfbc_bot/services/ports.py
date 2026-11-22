@@ -49,6 +49,10 @@ class Notifier(Protocol):
         """Редактирует сообщение бота. Telegram не присылает уведомлений о правках."""
         ...
 
+    async def send_document(
+        self, chat_id: int, path: str, *, thread_id: int | None = None
+    ) -> bool: ...
+
     async def send_poll(
         self,
         chat_id: int,

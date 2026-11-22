@@ -6,6 +6,7 @@
 
 from aiogram.types import BotCommand
 
+from pfbc_bot.domain.enums import SquadRole
 from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.schemas.squads import UserContext
 
@@ -60,6 +61,8 @@ def commands_for(ctx: UserContext) -> list[BotCommand]:
             if command.command not in seen:
                 seen.add(command.command)
                 result.append(command)
+    if ctx.is_admin or ctx.squads_with_roles(SquadRole.COACH):
+        result.append(BotCommand(command="postmatch", description="Послематчевые анкеты и отчёты"))
     if ctx.is_admin:
         result += ADMIN_COMMANDS
     return [*result, CANCEL]

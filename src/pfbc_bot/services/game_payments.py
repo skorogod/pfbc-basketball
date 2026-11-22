@@ -379,7 +379,7 @@ class GamePaymentService:
             match = await self._match(uow, actor, match_event_id)
             settings = await load_squad_settings(uow, match.squad_id)
             members = await _active_members(uow, match.squad_id)
-            voted = [uid for uid in await _voted_ids(uow, match.id) if uid in members]
+            voted = [uid for uid in await match_voter_ids(uow, match.id) if uid in members]
             others = sorted(
                 (u for uid, u in members.items() if uid not in set(voted)), key=_name_key
             )
@@ -818,7 +818,7 @@ async def _players_and_paid(
     оплатившие — «Оплатил». Только активные участники состава (вышедшим не напоминаем)."""
     members = await _active_members(uow, payment.squad_id)
     roster = await uow.game_payments.player_ids(payment.id)
-    player_ids = roster if roster is not None else set(await _voted_ids(uow, payment.event_id))
+    player_ids = roster if roster is not None else set(await match_voter_ids(uow, payment.event_id))
     paid_ids: set[int] = set()
     pay_poll = await uow.polls.get_for_ref(PollType.GAME_PAYMENT, GAME_PAYMENT_REF, payment.id)
     if pay_poll is not None:
@@ -838,7 +838,7 @@ async def _active_members(uow: UnitOfWork, squad_id: int) -> dict[int, User]:
     }
 
 
-async def _voted_ids(uow: UnitOfWork, match_event_id: int) -> list[int]:
+async def match_voter_ids(uow: UnitOfWork, match_event_id: int) -> list[int]:
     """Ответившие «Буду (игрок)» в действующем опросе участия — по времени ответа."""
     match_poll = await uow.polls.get_for_ref(PollType.MATCH, EVENT_REF, match_event_id)
     if match_poll is None:
@@ -856,7 +856,7 @@ async def _voted_ids(uow: UnitOfWork, match_event_id: int) -> list[int]:
 async def _voted_count(uow: UnitOfWork, squad_id: int, match_event_id: int) -> int:
     """Сколько активных участников ответили «Буду (игрок)»."""
     members = await _active_members(uow, squad_id)
-    return sum(uid in members for uid in await _voted_ids(uow, match_event_id))
+    return sum(uid in members for uid in await match_voter_ids(uow, match_event_id))
 
 
 async def _roster_players(uow: UnitOfWork, squad_id: int, player_ids: list[int]) -> list[User]:

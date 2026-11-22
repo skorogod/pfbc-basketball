@@ -11,6 +11,7 @@ from pfbc_bot.schemas.base import DTO
 class EventCreate(BaseModel):
     squad_id: int
     type: EventType
+    opponent: str | None = Field(default=None, max_length=200)
     title: str = Field(min_length=1, max_length=200)
     # у турнира дата старта может быть ещё неизвестна; у остальных событий — обязательна
     starts_at: datetime | None = None

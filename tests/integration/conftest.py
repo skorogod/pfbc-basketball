@@ -96,6 +96,9 @@ class FakeNotifier:
         self.edits.append((chat_id, message_id, text))
         return True
 
+    async def send_document(self, chat_id: int, path: str, *, thread_id: int | None = None) -> bool:
+        return bool(await self.send_message(chat_id, path, thread_id=thread_id))
+
     async def send_poll(
         self, chat_id: int, question: str, options: Sequence[str], *, thread_id: int | None = None
     ) -> SentPoll | None:

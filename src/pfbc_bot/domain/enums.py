@@ -29,6 +29,7 @@ class TopicPurpose(StrEnum):
     GENERAL = "general"
     TRAININGS = "trainings"
     MATCH = "match"  # матчи: опрос участия и сбор денег за игру
+    MATCH_ANALYSIS = "match_analysis"
     GREETINGS = "greetings"
     PAYMENTS = "payments"
     TEAMBUILDING = "teambuilding"  # собрания команды

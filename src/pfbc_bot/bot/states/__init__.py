@@ -25,6 +25,7 @@ class TrainingEdit(StatesGroup):
 
 
 class EventCreation(StatesGroup):
+    opponent = State()
     type = State()
     tournament = State()  # матч: турнир, в рамках которого он играется
     title = State()

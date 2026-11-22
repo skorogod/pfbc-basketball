@@ -15,6 +15,7 @@ from pfbc_bot.services.membership import MembershipService
 from pfbc_bot.services.permissions import PermissionService, Recipients
 from pfbc_bot.services.polls import PollService
 from pfbc_bot.services.ports import MatchSource, Notifier
+from pfbc_bot.services.postmatch import PostMatchService
 from pfbc_bot.services.receipts import ReceiptService
 from pfbc_bot.services.registration import RegistrationService
 from pfbc_bot.services.settings import SettingsService
@@ -37,6 +38,7 @@ class Services:
     events: EventService
     matches: MatchService
     game_payments: GamePaymentService
+    postmatch: PostMatchService
     receipts: ReceiptService
     permissions: PermissionService
 
@@ -69,5 +71,6 @@ def build_services(
         matches=MatchService(uow_factory, notifier, events, match_source, recipients, admin_ids),
         game_payments=game_payments,
         receipts=receipts,
+        postmatch=PostMatchService(uow_factory, notifier, admin_ids),
         permissions=PermissionService(uow_factory),
     )

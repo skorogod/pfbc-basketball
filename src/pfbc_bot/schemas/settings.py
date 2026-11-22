@@ -14,6 +14,7 @@ class Features(BaseModel):
 
     model_config = ConfigDict(extra="ignore")  # устаревшие ключи в БД не ломают загрузку
 
+    post_match_surveys: bool = False
     training_polls: bool = True
     duty: bool = True
     birthdays: bool = True
@@ -33,6 +34,12 @@ class SquadSettings(BaseModel):
     model_config = ConfigDict(extra="ignore")  # устаревшие ключи в БД не ломают загрузку
 
     # id команды на mtgame.ru (mtgame.ru/team/<id>) — оттуда берутся матчи ABL; null — нет
+    survey_delay_hours: int = Field(default=2, ge=0, le=168)
+    survey_reminder_hours: int = Field(default=12, ge=1, le=720)
+    survey_deadline_hours: int = Field(default=24, ge=1, le=720)
+    survey_report_days: int = Field(default=30, ge=1, le=3650)
+    # Внутренние ID пользователей с персональным допуском к чувствительным полям.
+    survey_sensitive_users: list[int] = Field(default_factory=list)
     mtgame_team_id: int | None = Field(default=None, ge=1)
     # поиск следующей игры на mtgame — с этого дня недели (0 — пн) и времени после сыгранной игры
     # и до появления даты следующей: лига назначает её обычно во вторник вечером

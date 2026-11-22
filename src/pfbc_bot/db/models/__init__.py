@@ -13,6 +13,7 @@ from pfbc_bot.db.models.payments import (
     RosterNotice,
 )
 from pfbc_bot.db.models.polls import Poll, PollAnswer
+from pfbc_bot.db.models.postmatch import MatchSurvey, ReportRecipient, SurveyPlayer, SurveyReport
 from pfbc_bot.db.models.squads import (
     Squad,
     SquadChat,
@@ -33,6 +34,7 @@ __all__ = [
     "GamePaymentPlayer",
     "Greeting",
     "Match",
+    "MatchSurvey",
     "PaymentPeriod",
     "PaymentReceipt",
     "PaymentReminderConfig",
@@ -40,6 +42,7 @@ __all__ = [
     "PollAnswer",
     "ReceiptRequest",
     "ReminderLog",
+    "ReportRecipient",
     "RosterNotice",
     "SettingsEntry",
     "Squad",
@@ -47,6 +50,8 @@ __all__ = [
     "SquadMember",
     "SquadRoleAssignment",
     "SquadTopic",
+    "SurveyPlayer",
+    "SurveyReport",
     "Training",
     "TrainingSchedule",
     "User",

@@ -49,6 +49,8 @@ def build_jobs(services: Services, timezone: str) -> list[Job]:
         Job("unpin_events", services.events.unpin_ended, every(minutes=5)),
         # тик; в mtgame — только пока ищется следующая игра (со вторника) или с мониторингом
         Job("match_sync", services.matches.sync, every(minutes=30), run_on_start=True),
+        Job("post_match_surveys", services.postmatch.tick, every(minutes=1), run_on_start=True),
+        Job("post_match_reports", services.postmatch.reports.process, every(seconds=10)),
         Job("match_fallback", services.matches.fallback_due, every(minutes=5)),
         Job("game_payment_reminders", services.game_payments.remind_due, every(minutes=5)),
         # «Буду (игрок)» отметили N — тренерам; изменения за минуту — одним сообщением
