@@ -87,7 +87,24 @@ async def test_survey_lifecycle(
         [report] = list(await uow.session.scalars(select(SurveyReport)))
         assert report.snapshot["games"][-1]["stats"]["n"] == 0
         assert await uow.session.scalar(select(func.count()).select_from(ReportRecipient)) == 2
+    # Черновик старой версии уже на подтверждении: новый ответ обязателен,
+    # прежние оценки остаются под исходными ключами.
+    async with uow_factory() as uow:
+        draft = await uow.session.scalar(
+            select(SurveyPlayer).where(SurveyPlayer.token == tokens[first.user.id])
+        )
+        draft.step = 8
+        draft.answers = {"1": "7", "2": "great", "3": "no", "4": "4"}
+        await uow.commit()
+    message, _, step = await action(first, 8, "submit")
+    assert step == 9 and "Вопрос 1 из 8" in message
+    async with uow_factory() as uow:
+        draft = await uow.session.scalar(
+            select(SurveyPlayer).where(SurveyPlayer.token == tokens[first.user.id])
+        )
+        assert draft.status == "started" and draft.answers["1"] == "7"
     for step, code, value in [
+        (9, "satisfied", None),
         (1, "7", None),
         (2, "great", None),
         (3, "pain", None),
@@ -212,7 +229,11 @@ async def test_schedule_reminder_and_deadline(
     await svc.reports.process()
     doc = PdfReader(notifier.to(CHAT_ID)[-1].text)
     assert sum(len(page.images) for page in doc.pages) == 0
-    assert any("Нет данных · Ответили 0 из 1" in page.extract_text() for page in doc.pages)
+    first_page = doc.pages[0].extract_text()
+    assert "Нет данных" in first_page
+    assert "0/1" in first_page
+    assert "Ответили · 0" in first_page
+    assert "Без ответа · 1" in first_page
 
 
 async def test_history_periods_and_player_comparison(

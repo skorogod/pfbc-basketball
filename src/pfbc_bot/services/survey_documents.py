@@ -29,7 +29,13 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from pfbc_bot.domain.postmatch import EXCLUDED, STATUS, answer_label
+from pfbc_bot.domain.postmatch import (
+    EXCLUDED,
+    PLAYING_TIME,
+    PLAYING_TIME_KEY,
+    PLAYING_TIME_OPTIONS,
+    answer_label,
+)
 from pfbc_bot.services import survey_charts as charts
 
 Row = dict[str, Any]
@@ -39,6 +45,13 @@ def summarize(rows: list[Row]) -> Row:
     answered = [r["answers"] for r in rows if r["status"] == "submitted"]
     totals = Counter(r["status"] for r in rows)
     return {
+        "playing_time": dict(
+            Counter(
+                a[PLAYING_TIME_KEY]
+                for a in answered
+                if a.get(PLAYING_TIME_KEY) in PLAYING_TIME_OPTIONS
+            )
+        ),
         "n": len(answered),
         "total": sum(v for k, v in totals.items() if k not in EXCLUDED),
         "absent": totals["absent"],
@@ -120,8 +133,9 @@ def render_report(snapshot: Row, kind: str, as_of: str) -> bytes:
     if kind == "csv":
         stream = io.StringIO()
         writer = csv.writer(stream)
-        cols = [1, 4, 5, 6, 2, 3, 7]
+        cols = [PLAYING_TIME, 1, 4, 5, 6, 2, 3, 7]
         labels = {
+            PLAYING_TIME: "Удовлетворённость сыгранным временем",
             1: "Нагрузка",
             2: "Самочувствие",
             3: "Боль",
@@ -130,7 +144,7 @@ def render_report(snapshot: Row, kind: str, as_of: str) -> bytes:
             6: "Командно",
             7: "Комментарий",
         }
-        writer.writerow(["Дата", "Соперник", "ID", "ФИО", "Статус", *(labels[q] for q in cols)])
+        writer.writerow(["Дата", "Соперник", "ID", "ФИО", *(labels[q] for q in cols)])
         for game in games:
             for row in game["rows"]:
                 if snapshot["player"] and row["id"] != snapshot["player"]:
@@ -140,9 +154,8 @@ def render_report(snapshot: Row, kind: str, as_of: str) -> bytes:
                     game["opponent"],
                     row["id"],
                     row["name"],
-                    STATUS[row["status"]],
                     *(
-                        answer_label(q, row["answers"]) if row["status"] == "submitted" else ""
+                        answer_label(q, row["answers"]) if row["status"] == "submitted" else "—"
                         for q in cols
                     ),
                 ]
@@ -193,7 +206,7 @@ def make_snapshot(
             rows = [row for row in rows if row["id"] == player]
         sanitized.append({**game, "rows": rows})
     return {
-        "layout": 4,
+        "layout": 10,
         "visibility": visibility,
         "squad": squad,
         "anchor": anchor,
@@ -256,6 +269,23 @@ def _icon(d: Drawing, name: str, x: float, y: float) -> None:
     path = ShapePath(
         fillColor=None, strokeColor=_ACCENT, strokeWidth=2, strokeLineCap=1, strokeLineJoin=1
     )
+    if name == "hourglass":
+        # Original outline on the same 24 × 24 grid as the other report icons.
+        path.moveTo(5, 3)
+        path.lineTo(19, 3)
+        path.moveTo(5, 21)
+        path.lineTo(19, 21)
+        path.moveTo(7, 3)
+        path.lineTo(7, 7)
+        path.lineTo(17, 17)
+        path.lineTo(17, 21)
+        path.moveTo(17, 3)
+        path.lineTo(17, 7)
+        path.lineTo(7, 17)
+        path.lineTo(7, 21)
+        group.add(path)
+        d.add(group)
+        return
     for method, points in _ICONS[name]:
         if method == "closePath":
             path.closePath()
@@ -289,13 +319,19 @@ def _text(
     )
 
 
-def _metrics(
-    n: int, total: int, values: list[tuple[str, str, str]], *, period: bool = False
-) -> Drawing:
+def _metric_background() -> Drawing:
     d = Drawing(_WIDTH, 70)
     w = _WIDTH / 3
     for i in range(3):
         d.add(Rect(i * w, 2, w - 4, 66, rx=5, ry=5, fillColor=_LIGHT, strokeColor=None))
+    return d
+
+
+def _metrics(
+    n: int, total: int, values: list[tuple[str, str, str]], *, period: bool = False
+) -> Drawing:
+    d = _metric_background()
+    w = _WIDTH / 3
     _icon(d, "users", 7, 62)
     _text(
         d,
@@ -341,15 +377,17 @@ def _scores(game: Row, player: int) -> list[tuple[str, str, str]]:
     return result
 
 
-def _details(doc: list[Flowable], snapshot: Row) -> None:
+def _details(doc: list[Flowable], snapshot: Row, heading: str = "") -> None:
     player = snapshot["player"]
     games = snapshot["games"] if player else snapshot["games"][-1:]
     block: list[Flowable] = []
-    block.append(_paragraph("Анкеты игрока" if player else "Ответы игроков", _HEADINGS[1]))
+    block.append(
+        _paragraph(heading or ("Анкеты игрока" if player else "Ответы игроков"), _HEADINGS[1])
+    )
     rows = [
         [
             "Дата · соперник" if player else "ФИО",
-            "Статус",
+            "Игровое время",
             "Нагрузка",
             "Оценка",
             "Состояние",
@@ -365,17 +403,77 @@ def _details(doc: list[Flowable], snapshot: Row) -> None:
             answers = row["answers"]
             fields = [
                 answer_label(q, answers) if row["status"] == "submitted" else "—"
-                for q in (1, 4, 2, 3, 5, 6)
+                for q in (PLAYING_TIME, 1, 4, 2, 3, 5, 6)
             ]
-            rows.append([who, STATUS[row["status"]], *fields])
-            if answers.get("7"):
+            rows.append([who, *fields])
+            if row["status"] == "submitted" and answers.get("7"):
                 comments.append((who, answers["7"]))
-    _table(block, rows, [16, 12, 10, 8, 13, 11, 15, 15], numeric=(2, 3))
-    if comments:
+    _table(
+        block,
+        rows,
+        [12, 16, 11, 10, 13, 12, 13, 13] if player else [15, 16, 10, 10, 12, 11, 13, 13],
+        numeric=(2, 3),
+    )
+    if comments and not player:
         block.append(_paragraph("Комментарии", _HEADINGS[2]))
         for who, comment in comments:
             block.append(_paragraph(f"{who} — {comment}"))
-    doc.append(KeepTogether(block))
+    doc.extend(block)
+
+
+def _player_comments(doc: list[Flowable], games: list[Row]) -> None:
+    comments = [
+        (f"{game['date']} · {game['opponent']}", row["answers"]["7"])
+        for game in games
+        for row in game["rows"]
+        if row["status"] == "submitted" and row["answers"].get("7")
+    ]
+    if comments:
+        doc.append(_paragraph("Комментарии игрока", _HEADINGS[2]))
+        for who, comment in comments:
+            doc.append(_paragraph(f"{who} — {comment}"))
+
+
+def _player_metrics(games: list[Row], *, period: bool = False) -> Drawing:
+    answers = [r["answers"] for g in games for r in g["rows"] if r["status"] == "submitted"]
+    times = Counter(
+        a[PLAYING_TIME_KEY] for a in answers if a.get(PLAYING_TIME_KEY) in PLAYING_TIME_OPTIONS
+    )
+    total = sum(times.values())
+    time = "Нет данных"
+    if total:
+        time = (
+            "\n".join(
+                f"{label}: {times[code] / total:.0%}"
+                for code, label in PLAYING_TIME_OPTIONS.items()
+            )
+            if period
+            else PLAYING_TIME_OPTIONS[next(iter(times))]
+        )
+    values = [time]
+    for key, limit in (("1", 10), ("4", 5)):
+        scores = [int(a[key]) for a in answers if key in a]
+        values.append(f"{mean(scores):.1f} / {limit}" if scores else "Нет данных")
+    d = _metric_background()
+    w = _WIDTH / 3
+    for i, label in enumerate(("Игровое время", "Нагрузка игрока", "Самооценка игрока")):
+        x = i * w + 9
+        _icon(d, ("hourglass", "gauge", "target")[i], x, 62)
+        _text(d, x + 18, 51, label, 8, bold=True)
+        if i == 0:
+            if period and total:
+                for j, line in enumerate(time.splitlines()):
+                    _text(d, x, 34 - j * 12, line, 8.5, bold=True)
+            else:
+                size = 14.0
+                while pdfmetrics.stringWidth(time, "DejaVuSans-Bold", size) > w - 22:
+                    size -= 0.5
+                _text(d, x, 25, time, size, bold=True)
+                _text(d, x, 11, "Ответ игрока", 8, color=_MUTED)
+        else:
+            _text(d, x, 25, values[i], 19 if values[i] != "Нет данных" else 14, bold=True)
+            _text(d, x, 11, "Среднее за период" if period else "Оценка игрока", 8, color=_MUTED)
+    return d
 
 
 def _pdf(snapshot: Row, as_of: str) -> bytes:
@@ -395,66 +493,62 @@ def _pdf(snapshot: Row, as_of: str) -> bytes:
             name if player else fixture,
             f"{last['date']}  ·  {fixture if player else 'Последний матч'}",
         )
-        doc.append(_metrics(stats["n"], stats["total"], _scores(last, player)))
-        doc.append(
-            _paragraph(
-                f"Не участвовали в матче: {stats['absent']}   ·   Отказались: {stats['declined']}",
-                _SUB,
-            )
-        )
-        if stats["n"]:
-            doc.append(Spacer(1, 12))
-            doc.append(_paragraph("Оценки команды за матч", _HEADINGS[2]))
-            doc.append(charts.distribution(last, _WIDTH))
-            doc.append(
-                KeepTogether(
-                    [
-                        _paragraph("Запросы команды за матч", _HEADINGS[2]),
-                        charts.requests_chart(stats["skills"], _WIDTH, compact=True),
-                    ]
-                )
-            )
+        if player:
+            doc.append(_player_metrics([last]))
+            _details(doc, {**snapshot, "games": [last]}, "Анкета за последний матч")
         else:
-            doc.append(_paragraph("Нет данных · Ответили 0 из " + str(stats["total"])))
-        if player and last["rows"]:
-            last_answers: list[Flowable] = []
-            last_answers.append(_paragraph("Анкета за последний матч", _HEADINGS[2]))
-            row = last["rows"][0]
-            if row["status"] == "submitted":
-                a = row["answers"]
-                _table(
-                    last_answers,
-                    [
-                        ["Самочувствие", "Боль", "Индивидуально", "Командно"],
-                        [answer_label(q, a) for q in (2, 3, 5, 6)],
-                    ],
-                    [22, 22, 28, 28],
+            doc.append(_metrics(stats["n"], stats["total"], _scores(last, player)))
+            doc.append(
+                _paragraph(
+                    f"Не участвовали в матче: {stats['absent']}   ·   "
+                    f"Отказались: {stats['declined']}",
+                    _SUB,
                 )
-                if a.get("7"):
-                    last_answers.append(_paragraph(a["7"]))
-            else:
-                last_answers.append(_paragraph("Нет ответа · " + STATUS[row["status"]]))
-            doc.append(KeepTogether(last_answers))
+            )
+        if stats["n"]:
+            doc.append(
+                _paragraph(
+                    "Игрок и команда за матч" if player else "Оценки команды за матч", _HEADINGS[2]
+                )
+            )
+            doc.append(charts.distribution(last, _WIDTH, player=bool(player)))
+            if not player:
+                doc.append(
+                    KeepTogether(
+                        [
+                            _paragraph("Запросы команды за матч", _HEADINGS[2]),
+                            charts.requests_chart(stats["skills"], _WIDTH, compact=True),
+                        ]
+                    )
+                )
+        else:
+            doc.append(_paragraph("Нет данных"))
         if view == "staff":
             _details(doc, snapshot)
+        if player:
+            _player_comments(doc, [last])
         doc.append(PageBreak())
         dates = f"{games[0]['date']} — {last['date']}"
         _banner(doc, "ДИНАМИКА ЗА ПЕРИОД", name if player else snapshot["squad"], dates)
-        doc.append(
-            _metrics(
-                sum(g["stats"]["n"] for g in games),
-                sum(g["stats"]["total"] for g in games),
-                [
-                    ("Матчи", str(len(games)), "За выбранный период"),
-                    ("Ответили игроки", str(snapshot["unique"]), "Уникальных игроков"),
-                ],
-                period=True,
+        if player:
+            doc.append(_player_metrics(games, period=True))
+            _details(doc, snapshot, "Анкеты игрока за период")
+        else:
+            doc.append(
+                _metrics(
+                    sum(g["stats"]["n"] for g in games),
+                    sum(g["stats"]["total"] for g in games),
+                    [
+                        ("Матчи", str(len(games)), "За выбранный период"),
+                        ("Ответили игроки", str(snapshot["unique"]), "Уникальных игроков"),
+                    ],
+                    period=True,
+                )
             )
-        )
-        for start in range(0, len(games), 10):
-            batch = games[start : start + 10]
+        for start in range(0, len(games), 5):
+            batch = games[start : start + 5]
             trend_block: list[Flowable] = [
-                _paragraph("Динамика нагрузки и самооценки", _HEADINGS[2]),
+                _paragraph("Динамика показателей", _HEADINGS[2]),
             ]
             if any(g["stats"]["n"] for g in batch):
                 trend_block.append(charts.trends(batch, name, _WIDTH))
@@ -470,13 +564,17 @@ def _pdf(snapshot: Row, as_of: str) -> bytes:
                 table.append(
                     [game["date"], game["opponent"], f"{stats['n']} / {stats['total']}", *means]
                 )
-            _table(trend_block, table, [17, 26, 19, 18, 20])
-            doc.append(KeepTogether(trend_block))
+            if not player:
+                _table(trend_block, table, [16, 23, 20, 20, 21])
+            doc.extend(trend_block)
         request_block: list[Flowable] = [
-            _paragraph("Запросы за период", _HEADINGS[2]),
-            _paragraph(f"{dates}   ·   Ответили игроков: {snapshot['unique']}", _SUB),
+            _paragraph("Запросы игрока за период" if player else "Запросы за период", _HEADINGS[2]),
+            _paragraph(
+                dates if player else f"{dates}   ·   Ответили игроков: {snapshot['unique']}", _SUB
+            ),
         ]
-        if any(snapshot["requests"].values()) or any(snapshot["personal_requests"].values()):
+        requests = snapshot["personal_requests"] if player else snapshot["requests"]
+        if any(requests.values()):
             request_block.append(
                 charts.requests_chart(
                     snapshot["requests"],
@@ -489,7 +587,7 @@ def _pdf(snapshot: Row, as_of: str) -> bytes:
             request_block.append(_paragraph("Нет запросов"))
         doc.append(KeepTogether(request_block))
         if player:
-            _details(doc, snapshot)
+            _player_comments(doc, games)
     else:
         _banner(doc, title.upper(), name or snapshot["squad"], "За выбранный период матчей нет.")
     output = io.BytesIO()

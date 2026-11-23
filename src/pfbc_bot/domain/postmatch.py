@@ -7,7 +7,17 @@ from typing import Any
 from pfbc_bot.services.errors import Conflict
 from pfbc_bot.services.ports import InlineButton, Keyboard
 
+PLAYING_TIME = 9
+PLAYING_TIME_KEY = "playing_time_satisfaction"
+PLAYING_TIME_OPTIONS = {
+    "more": "Хочу играть больше",
+    "less": "Хочу играть меньше",
+    "satisfied": "Удовлетворён",
+}
+QUESTION_ORDER = (PLAYING_TIME, 1, 2, 3, 4, 5, 6, 7)
+
 QUESTIONS = {
+    PLAYING_TIME: "Удовлетворены ли вы сыгранным временем?",
     1: "Какой была физическая нагрузка? (1 — очень легко, 10 — предельная)",
     2: "Как вы себя чувствуете после игры?",
     3: "Испытываете боль или дискомфорт?",
@@ -17,6 +27,7 @@ QUESTIONS = {
     7: "Есть ли комментарий? Введите до 1000 символов.",
 }
 OPTIONS = {
+    PLAYING_TIME: PLAYING_TIME_OPTIONS,
     1: {str(i): str(i) for i in range(1, 11)},
     2: {
         "great": "Отлично",
@@ -72,11 +83,11 @@ def player_labels(names: dict[int, str]) -> dict[int, str]:
 
 
 def answer_label(step: int, answers: dict[str, Any]) -> str:
-    value = answers.get(str(step))
+    value = answers.get(PLAYING_TIME_KEY if step == PLAYING_TIME else str(step))
     if isinstance(value, list):
         return ", ".join(OPTIONS[step].get(v, "Ничего") for v in value) or "Пропущено"
     if value is None:
-        return "Пропущено"
+        return "Нет данных" if step == PLAYING_TIME else "Пропущено"
     label = OPTIONS.get(step, {}).get(str(value), str(value))
     if step == 3 and answers.get("pain_detail"):
         label += " — " + answers["pain_detail"]
@@ -101,38 +112,43 @@ def form(token: str, step: int, answers: dict[str, Any]) -> tuple[str, Keyboard]
     rows = []
     if step == REVIEW:
         text = "Проверьте ответы. После отправки изменить их нельзя.\n" + "\n".join(
-            f"{i}. {escape(answer_label(i, answers))}" for i in QUESTIONS
+            f"{n}. {escape(answer_label(i, answers))}" for n, i in enumerate(QUESTION_ORDER, 1)
         )
         rows.append([button("Отправить", "submit")])
     elif step == PAIN_DETAIL:
-        text = "Вопрос 3 из 7 · Где ощущается боль? Можно пропустить."
+        text = "Вопрос 4 из 8 · Где ощущается боль? Можно пропустить."
     else:
-        text = f"Вопрос {step} из 7 · {QUESTIONS[step]}"
+        text = f"Вопрос {QUESTION_ORDER.index(step) + 1} из 8 · {QUESTIONS[step]}"
         buttons = []
         for code, label in OPTIONS.get(step, {}).items():
             if step in (5, 6) and code in answers.get(str(step), []):
                 label = "✓ " + label
             buttons.append(button(label, code))
-        width = 5 if step in (1, 4) else 2
+        width = 5 if step in (1, 4) else 1 if step == PLAYING_TIME else 2
         rows.extend(buttons[i : i + width] for i in range(0, len(buttons), width))
         if step in (5, 6):
             none = "✓ Ничего" if answers.get(str(step)) == ["none"] else "Ничего"
             rows.append([button(none, "none"), button("Готово", "done")])
     if step in (5, 6, 7, PAIN_DETAIL):
         rows.append([button("Пропустить", "skip")])
-    if step > 1:
+    if step != PLAYING_TIME:
         rows.append([button("Назад", "back")])
     return text, rows
 
 
 def advance(step: int, answers: dict[str, Any], action: str, text: str | None) -> int:
     """Изменяет копию черновика. Возвращает следующий шаг."""
-    if action == "back" and step > 1:
+    if action == "back" and step != PLAYING_TIME:
+        if step == 1:
+            return PLAYING_TIME
         if step == PAIN_DETAIL:
             return 3
         if step == 4 and answers.get("3") == "pain":
             return PAIN_DETAIL
         return step - 1
+    if step == PLAYING_TIME and action in PLAYING_TIME_OPTIONS:
+        answers[PLAYING_TIME_KEY] = action
+        return 1
     if step in (PAIN_DETAIL, 7) and action in ("text", "skip"):
         key = "pain_detail" if step == PAIN_DETAIL else "7"
         if action == "text":

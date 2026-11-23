@@ -10,7 +10,7 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator
 from reportlab.platypus import Image
 
-from pfbc_bot.domain.postmatch import OPTIONS
+from pfbc_bot.domain.postmatch import OPTIONS, PLAYING_TIME_KEY, PLAYING_TIME_OPTIONS
 
 NAVY = "#192c46"
 TEAL = "#087e83"
@@ -79,10 +79,12 @@ def _image(fig: Figure) -> Image:
     return Image(data, width=w * 72, height=h * 72)
 
 
-def distribution(game: dict[str, Any], width: float) -> Image:
-    fig = Figure(figsize=(width / 72, 2.2), layout="constrained")
+def distribution(game: dict[str, Any], width: float, *, player: bool = False) -> Image:
+    fig = Figure(figsize=(width / 72, 4.4), layout="constrained")
+    grid = fig.add_gridspec(2, 2)
+    axes = [fig.add_subplot(grid[0, :]), fig.add_subplot(grid[1, 0])]
     for ax, q, limit, label in zip(
-        fig.subplots(1, 2), ("1", "4"), (10, 5), ("Нагрузка", "Самооценка"), strict=True
+        axes, ("1", "4"), (10, 5), ("Нагрузка", "Самооценка"), strict=True
     ):
         _axes(ax, label, f"{label}, баллы (1–{limit})", "Кол-во игроков")
         scores = game["stats"]["scores"][q]
@@ -107,18 +109,25 @@ def distribution(game: dict[str, Any], width: float) -> Image:
             fontweight="bold",
         )
         ax.set(xticks=scale, xlim=(0.5, limit + 0.5), ylim=(0, max(1, *counts) * 1.32))
+        if player:
+            own = _personal_answer(game, q)
+            if own is not None:
+                _player_dot(ax, int(own), counts[int(own) - 1] / 2)
+                ax.legend(fontsize=6, loc="upper right")
         ax.yaxis.set_major_locator(MaxNLocator(integer=True, nbins=4))
         for tick, color in zip(ax.get_xticklabels(), palette, strict=True):
             tick.set_color(color)
             tick.set_fontweight("bold")
+    _time_distribution(fig.add_subplot(grid[1, 1]), game, player=player)
     return _image(fig)
 
 
 def trends(games: list[dict[str, Any]], player_name: str, width: float) -> Image:
-    stacked = len(games) > 5 or (len(games) >= 4 and any(len(g["opponent"]) > 8 for g in games))
-    fig = Figure(figsize=(width / 72, 4.95 if stacked else 2.8), layout="constrained")
+    fig = Figure(figsize=(width / 72, 4.6), layout="constrained")
+    grid = fig.add_gridspec(2, 2)
+    axes = [fig.add_subplot(grid[0, :]), fig.add_subplot(grid[1, 0])]
     for ax, q, limit, label in zip(
-        fig.subplots(2, 1) if stacked else fig.subplots(1, 2),
+        axes,
         ("1", "4"),
         (10, 5),
         ("Нагрузка", "Самооценка"),
@@ -129,6 +138,9 @@ def trends(games: list[dict[str, Any]], player_name: str, width: float) -> Image
             _load_key(ax)
             for lo, hi, _, _, background in ZONES:
                 ax.axhspan(lo - 0.5, hi + 0.5, color=background, zorder=0)
+        else:
+            for lo, hi, background in ((1, 2, "#fbe6df"), (2, 4, "#faf3d6"), (4, 5, "#e6f5f1")):
+                ax.axhspan(lo, hi, color=background, zorder=0)
         x = list(range(len(games)))
         series = [mean(v) if (v := g["stats"]["scores"][q]) else float("nan") for g in games]
         ax.plot(
@@ -142,7 +154,7 @@ def trends(games: list[dict[str, Any]], player_name: str, width: float) -> Image
         )
         if player_name:
             personal = [
-                float(g["rows"][0]["answers"].get(q, "nan")) if g["rows"] else float("nan")
+                float(value) if (value := _personal_answer(g, q)) is not None else float("nan")
                 for g in games
             ]
             ax.plot(x, personal, "D--", color="#a14468", lw=1.4, ms=3.7, label=player_name)
@@ -156,6 +168,7 @@ def trends(games: list[dict[str, Any]], player_name: str, width: float) -> Image
         ax.set_yticks(range(1, limit + 1, 2) if limit == 10 else range(1, 6))
         if limit == 10:
             ax.set_yticks([1, 3, 5, 7, 9, 10])
+    _time_trend(fig.add_subplot(grid[1, 1]), games, player=bool(player_name))
     return _image(fig)
 
 
@@ -167,41 +180,23 @@ def requests_chart(
     compact: bool = False,
     personal: dict[str, Any] | None = None,
 ) -> Image:
-    # Для игрока каждая строка содержит две шкалы с разными единицами.
-    fig = Figure(
-        figsize=(width / 72, 4.65 if player else (2.0 if compact else 2.65)), layout="constrained"
-    )
-    axes = fig.subplots(2 if player else 1, 2, squeeze=False)
+    fig = Figure(figsize=(width / 72, 2.0 if compact else 2.65), layout="constrained")
+    axes = fig.subplots(1, 2)
     for i, q in enumerate((5, 6)):
-        series = counts[str(q)]
-        own = personal[str(q)] if personal else {}
-        codes = sorted(OPTIONS[q], key=lambda k: (-series.get(k, 0), -own.get(k, 0), OPTIONS[q][k]))
-        if compact:
+        series = personal[str(q)] if player and personal else counts[str(q)]
+        codes = sorted(OPTIONS[q], key=lambda k: (-series.get(k, 0), OPTIONS[q][k]))
+        if compact or player:
             codes = [code for code in codes if series.get(code)]
-        label = "Навык" if q == 5 else "Командный элемент"
-        if player:
-            _bars(axes[i, 0], "Отметил игрок", "Кол-во матчей", label, q, codes, own, PURPLE)
-            _bars(
-                axes[i, 1],
-                "Отметили другие игроки",
-                "Кол-во игроков",
-                label,
-                q,
-                codes,
-                series,
-                TEAL,
-            )
-        else:
-            _bars(
-                axes[0, i],
-                "Индивидуальные навыки" if q == 5 else "Командные элементы",
-                "Кол-во игроков",
-                label,
-                q,
-                codes,
-                series,
-                TEAL if q == 5 else PURPLE,
-            )
+        _bars(
+            axes[i],
+            "Индивидуальные навыки" if q == 5 else "Командные элементы",
+            "Кол-во матчей" if player else "Кол-во игроков",
+            "Навык" if q == 5 else "Командный элемент",
+            q,
+            codes,
+            series,
+            PURPLE if player or q == 6 else TEAL,
+        )
     return _image(fig)
 
 
@@ -238,3 +233,159 @@ def _bars(
     ax.grid(False)
     ax.grid(axis="x", linewidth=0.4, color="#dbe3ea")
     ax.bar_label(bars, padding=2, fontsize=7.5, color=NAVY)
+
+
+def _time_distribution(ax: Axes, game: dict[str, Any], *, player: bool = False) -> None:
+    _axes(ax, "Игровое время", "Удовлетворённость временем", "Кол-во игроков")
+    counts = game["stats"].get("playing_time", {})
+    if not sum(counts.values()):
+        ax.text(0.5, 0.5, "Нет данных", transform=ax.transAxes, ha="center")
+    values = [counts.get(code, 0) for code in PLAYING_TIME_OPTIONS]
+    bars = ax.bar(range(3), values, color=["#ada5dc", "#796cbc", "#43397f"], width=0.6)
+    ax.bar_label(bars, labels=[str(v) if v else "" for v in values], padding=2, fontsize=8)
+    ax.set(
+        xticks=range(3),
+        xticklabels=["Хочу играть\nбольше", "Хочу играть\nменьше", "Удовлетворён"],
+        ylim=(0, max(1, *values) * 1.3),
+    )
+    ax.tick_params(axis="x", labelsize=7)
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+    if player and (own := _personal_answer(game, PLAYING_TIME_KEY)) in PLAYING_TIME_OPTIONS:
+        index = list(PLAYING_TIME_OPTIONS).index(own)
+        _player_dot(ax, index, values[index] / 2)
+        ax.legend(fontsize=6, loc="upper right")
+
+
+def _time_trend(ax: Axes, games: list[dict[str, Any]], *, player: bool = False) -> None:
+    _axes(ax, "Игровое время", "Матч (дата и соперник)", "Доля ответов, %")
+    x = list(range(len(games)))
+    counts = [g["stats"].get("playing_time", {}) for g in games]
+    totals = [sum(c.values()) for c in counts]
+    bottom = [0.0] * len(games)
+    for (code, label), color in zip(
+        PLAYING_TIME_OPTIONS.items(), ("#bd4d32", "#e5bd4f", "#398565"), strict=True
+    ):
+        values = [100 * c.get(code, 0) / n if n else 0 for c, n in zip(counts, totals, strict=True)]
+        ax.bar(
+            x,
+            values,
+            bottom=bottom,
+            color=color,
+            edgecolor="white",
+            width=0.58,
+            label=label,
+            linewidth=0.6,
+        )
+        bottom = [b + v for b, v in zip(bottom, values, strict=True)]
+    for i, n in enumerate(totals):
+        ax.text(i, 102 if n else 45, f"n={n}" if n else "Нет\nданных", ha="center", fontsize=6)
+    ax.set(
+        xticks=x,
+        xticklabels=[f"{g['date'][:5]}\n{g['opponent'][:7]}" for g in games],
+        ylim=(0, 112),
+        yticks=[0, 25, 50, 75, 100],
+    )
+    ax.tick_params(axis="x", labelsize=6.5)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.3), fontsize=6, frameon=False)
+
+    # Measure the final axes in points: small segments get leader-line labels.
+    assert isinstance(ax.figure, Figure)
+    ax.figure.draw_without_rendering()
+    height_points = ax.get_window_extent().height * 72 / ax.figure.dpi
+    min_height = 9 * 112 / height_points
+    for i, (counts_for_game, total) in enumerate(zip(counts, totals, strict=True)):
+        if not total:
+            continue
+        low = 0.0
+        outside = []
+        for code in PLAYING_TIME_OPTIONS:
+            value = 100 * counts_for_game.get(code, 0) / total
+            center = low + value / 2
+            low += value
+            if not value:
+                continue
+            text = "<1%" if value < 1 else f"{value:.0f}%"
+            if value >= min_height:
+                marked = player and _personal_answer(games[i], PLAYING_TIME_KEY) == code
+                ax.text(
+                    i + 0.1 if marked else i,
+                    center,
+                    text,
+                    ha="center",
+                    va="center",
+                    fontsize=6 if marked else 7,
+                    color=NAVY if code == "less" else "white",
+                    fontweight="bold",
+                )
+            else:
+                outside.append((center, text))
+        # Separate callouts vertically, keeping them within the 0–100% range.
+        positions: list[float] = []
+        for center, _ in outside:
+            positions.append(
+                max(min_height / 2, center, positions[-1] + min_height if positions else 0)
+            )
+        if positions and positions[-1] > 100 - min_height / 2:
+            shift = positions[-1] - (100 - min_height / 2)
+            positions = [pos - shift for pos in positions]
+        for (center, text), position in zip(outside, positions, strict=True):
+            ax.annotate(
+                text,
+                xy=(i + 0.29, center),
+                xytext=(i + 0.34, position),
+                ha="left",
+                va="center",
+                fontsize=5.5,
+                color=NAVY,
+                annotation_clip=False,
+                arrowprops={
+                    "arrowstyle": "-",
+                    "color": NAVY,
+                    "lw": 0.5,
+                    "shrinkA": 0,
+                    "shrinkB": 0,
+                },
+            )
+
+    if player:
+        for i, game in enumerate(games):
+            own = _personal_answer(game, PLAYING_TIME_KEY)
+            total = totals[i]
+            if own not in PLAYING_TIME_OPTIONS or not total:
+                continue
+            low = 0.0
+            for code in PLAYING_TIME_OPTIONS:
+                value = 100 * counts[i].get(code, 0) / total
+                if code == own and value:
+                    _player_dot(ax, i - 0.19, low + value / 2)
+                    break
+                low += value
+        handles, labels = ax.get_legend_handles_labels()
+        unique = dict(zip(labels, handles, strict=True))
+        ax.legend(
+            unique.values(),
+            unique.keys(),
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.3),
+            fontsize=6,
+            frameon=False,
+        )
+
+
+def _personal_answer(game: dict[str, Any], key: str) -> Any:
+    rows = game["rows"]
+    return rows[0]["answers"].get(key) if rows and rows[0]["status"] == "submitted" else None
+
+
+def _player_dot(ax: Axes, x: float, y: float) -> None:
+    ax.plot(
+        x,
+        y,
+        "o",
+        color=NAVY,
+        markeredgecolor="white",
+        markeredgewidth=1,
+        markersize=5,
+        zorder=5,
+        label="Ответ игрока",
+    )
