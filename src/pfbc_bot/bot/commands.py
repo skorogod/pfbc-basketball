@@ -34,7 +34,10 @@ COMMANDS_BY_PERMISSION: dict[Permission, list[BotCommand]] = {
         BotCommand(command="review", description="Назначить разбор игры"),
         BotCommand(command="tournaments", description="Турниры: матчи и стоимость игры"),
     ],
-    Permission.GAME_PAYMENTS: [BotCommand(command="game_pay", description="Сбор денег за игру")],
+    Permission.GAME_PAYMENTS: [
+        BotCommand(command="roster", description="Сформировать заявку на матч"),
+        BotCommand(command="game_pay", description="Оплата матча"),
+    ],
     Permission.INVITE: [BotCommand(command="invite", description="Ссылка для новичка")],
     Permission.RECEIPTS: [BotCommand(command="receipts", description="Квитанции за тренировки")],
 }

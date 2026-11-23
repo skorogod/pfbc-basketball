@@ -324,3 +324,34 @@ async def test_legacy_payment_without_roster_uses_poll(
         await uow.commit()
     status = await services.game_payments.status(coach, match_id)
     assert status is not None and len(status.unpaid) == 2
+
+
+async def test_confirm_roster_retry_and_concurrent_coaches(
+    services: Services, notifier: FakeNotifier, match_id: int, uow_factory: UowFactory
+) -> None:
+    await vote(services, [1, 2])
+    ids = await user_ids(services, [2, 3])
+    coach = await ctx_of(services, COACH)
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    notifier.fail_on.add(notifier._attempts + 1)
+    with pytest.raises(Conflict, match="опубликовать состав"):
+        await services.game_payments.confirm_roster(coach, match_id, ids)
+    assert notifier.stopped_polls == []
+    assert (await services.events.get(match_id)).roster_player_ids is None
+    outcomes = await asyncio.gather(
+        *(services.game_payments.confirm_roster(actor, match_id, ids) for actor in (coach, admin)),
+        return_exceptions=True,
+    )
+    assert outcomes.count(None) == 1
+    assert sum(isinstance(outcome, Conflict) for outcome in outcomes) == 1
+    posts = [m for m in notifier.to(CHAT_ID) if "Состав на матч" in m.text]
+    assert len(posts) == 1 and posts[0].thread_id == MATCH_THREAD
+    assert len(notifier.stopped_polls) == 1
+    restarted = build_services(uow_factory, notifier, [ADMIN_TG_ID])
+    assert set((await restarted.events.get(match_id)).roster_player_ids or []) == set(ids)
+    async with uow_factory() as uow:
+        assert await restarted.postmatch._roster_ids(uow, match_id) == set(ids)
+
+    await services.events.move(admin, match_id, KICKOFF + timedelta(days=1), now=NOW)
+    assert len(notifier.polls) == 1
+    assert [e.id for e in await services.events.with_polls(1, now=NOW)] == [match_id]

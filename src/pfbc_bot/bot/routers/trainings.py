@@ -420,7 +420,7 @@ async def on_attendance(
     )
 
 
-async def _payment_status(
+async def payment_status(
     ctx: UserContext, services: Services, event_id: int, tz: str
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     """Если за игру собирают деньги — кто из игроков оплатил (только тренеру и админу) и
@@ -469,7 +469,7 @@ async def on_event_attendance(
     event = summary.event
     squad = await services.squads.get(event.squad_id)
     tournament = f" · 🏆 {html.escape(event.tournament_title)}" if event.tournament_title else ""
-    payment, markup = await _payment_status(ctx, services, event.id, squad.timezone)
+    payment, markup = await payment_status(ctx, services, event.id, squad.timezone)
     await message.answer(
         ru.EVENT_ATTENDANCE.format(
             type=EVENT_TYPE_TITLES[event.type],

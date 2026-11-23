@@ -91,6 +91,7 @@ class GamePaymentCreate(BaseModel):
     # действующий сбор по игре заменяется (/game_pay); False — отказ («Начать сбор»: второй
     # тренер не перебивает уже объявленный сбор)
     replace_active: bool = True
+    require_confirmed: bool = False
 
     @field_validator("player_ids")
     @classmethod

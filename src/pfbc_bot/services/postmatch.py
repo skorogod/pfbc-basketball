@@ -142,6 +142,9 @@ class PostMatchService:
 
     @staticmethod
     async def _roster_ids(uow: UnitOfWork, eid: int) -> set[int]:
+        event = await uow.events.get(eid)
+        if event and event.roster_player_ids is not None:
+            return set(event.roster_player_ids)
         payment = await uow.game_payments.active_for_event(eid)
         roster = await uow.game_payments.player_ids(payment.id) if payment else None
         return set(await match_voter_ids(uow, eid)) if roster is None else roster

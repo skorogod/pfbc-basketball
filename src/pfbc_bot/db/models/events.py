@@ -2,6 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    ARRAY,
     BigInteger,
     CheckConstraint,
     ForeignKey,
@@ -57,4 +58,8 @@ class Event(IdMixin, CreatedAtMixin, Base):
     # закреплённый пост о событии в группе; None — закрепа нет (снят или не удался)
     pinned_chat_id: Mapped[int | None] = mapped_column(BigInteger)
     pinned_message_id: Mapped[int | None]
+    roster_player_ids: Mapped[list[int] | None] = mapped_column(ARRAY(BigInteger))
+    roster_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    roster_chat_id: Mapped[int | None] = mapped_column(BigInteger)
+    payment_required: Mapped[bool | None]
     deleted_at: Mapped[datetime | None]

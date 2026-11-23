@@ -103,7 +103,7 @@ HELP_BY_PERMISSION: dict[str, str] = {
         "/review — назначить разбор игры (опрос «Буду / Не смогу»)\n"
         "/tournaments — турниры: привязка матчей, стоимость игры"
     ),
-    "game_payments": "/game_pay — сбор денег за игру: сумма, получатель, опрос «Оплатил»",
+    "game_payments": "/roster — сформировать заявку на матч\n/game_pay — оплата матча",
     "invite": "/invite — ссылка на регистрацию для новичка",
     "receipts": "/receipts — опрос «Прислали квитанцию за тренировки тренеру?» за месяц",
 }
@@ -583,7 +583,6 @@ RECEIPT_CLOSED = "🏁 Сбор квитанций за {month} завершён
 GAME_PAYMENT_NOT_FOUND = "Сбор денег не найден или отменён."
 GAME_PAYMENT_STATUS_OTHERS = "\nОплатили, но не в составе: {names}"
 GAME_PAYMENT_CHOOSE_MATCH = "За какую игру собираем деньги?"
-GAME_PAYMENT_NO_MATCHES = "Нет матчей для сбора денег. Создайте матч: /event_add"
 GAME_PAYMENT_ASK_AMOUNT = "Сумма с каждого игрока в рублях, например <code>2500</code>:"
 GAME_PAYMENT_BTN_SUGGESTED = "{amount} — {price} ÷ {players} игр."
 GAME_PAYMENT_ASK_DEADLINE = (
@@ -630,28 +629,27 @@ ROSTER_NOTICE = (
     "🏀 <b>{title}</b>\n🗓 {when}\n\n«Буду (игрок)» отметили <b>{count}</b>.{hints}\n\n"
     "<i>Количество игроков обновляется здесь же, обновлено {updated}</i>"
 )
-ROSTER_NOTICE_TOO_MANY = "В заявку войдут не больше {max} — выберете при начале сбора."
+ROSTER_NOTICE_TOO_MANY = "В заявку войдут не больше {max} — выберите игроков перед публикацией."
 ROSTER_NOTICE_SHORT = "До полного состава ({size}) не хватает {missing}."
-ROSTER_NOTICE_NO_PRICE = "Стоимость игры у турнира не указана — введёте её при начале сбора."
-ROSTER_BTN_START = "💰 Начать сбор"
+ROSTER_BTN_START = "Сформировать заявку"
+ROSTER_REQUIRED = "Сначала сформируйте заявку на матч."
+ROSTER_ALREADY_PUBLISHED = "Состав уже опубликован. Посмотреть его можно через /roster."
+ROSTER_NOT_SENT = "Не удалось опубликовать состав в группе. Попробуйте подтвердить заявку ещё раз."
+ROSTER_PAYMENT_QUESTION = "Нужна ли оплата за этот матч?"
+ROSTER_FREE = "Состав опубликован. Оплата не требуется."
 ROSTER_CHOOSE = (
     "<b>Заявка на игру</b> {title}\nОтмечено: <b>{count}</b> из {max}.\n"
-    "✅ — в заявке. Нажмите на игрока, чтобы включить или убрать. Платят только игроки заявки."
+    "✅ — в заявке. Нажмите на игрока, чтобы включить или убрать."
 )
 ROSTER_OTHERS = "Не отвечали «Буду (игрок)»:"
 ROSTER_BTN_MORE = "➕ Добавить из состава"
 ROSTER_BTN_LESS = "➖ Только ответившие «Буду (игрок)»"
-ROSTER_BTN_DONE = "Готово ({count}) →"
+ROSTER_BTN_DONE = "Подтвердить и опубликовать состав"
 # «Начать сбор» из уведомления: одна кнопка — сразу сбор или только недостающий шаг
 ROSTER_BTN_START_NOW = "✅ Готово. Начать сбор"
-ROSTER_BTN_ASK_PRICE = "Готово. Указать стоимость игры (включая оплату тренеру)"
-ROSTER_BTN_ASK_DETAILS = "Готово. Указать реквизиты"
 ROSTER_START_AMOUNT = "💰 С игрока: <b>{amount}</b> ({price} ÷ {players})"
-ROSTER_START_NO_PRICE = "💰 Стоимость игры у турнира не указана — укажете на следующем шаге."
 ROSTER_START_DEADLINE = "⏰ Оплатить до {when}"
 ROSTER_START_DETAILS = "💳 Реквизиты: {details}"
-ROSTER_START_NO_DETAILS = "💳 Сохранённых реквизитов нет — укажете на следующем шаге."
-ROSTER_START_FOOTER = "\n<i>Голосование «Буду» закроется, когда сбор будет опубликован.</i>"
 ROSTER_START_SUMMARY = "<b>Сбор за игру</b> {title}\n👥 Игроков в заявке: {players}\n{lines}"
 GAME_PAYMENT_ASK_GAME_PRICE = (
     "Стоимость игры целиком, включая оплату тренеру, в рублях, например <code>15000</code>. "
@@ -660,9 +658,9 @@ GAME_PAYMENT_ASK_GAME_PRICE = (
 ROSTER_LIMIT = "В заявке уже {max} — сначала уберите кого-нибудь."
 ROSTER_EMPTY = "Отметьте хотя бы одного игрока."
 ROSTER_TOO_MANY = "В заявке больше {max} игроков — уберите лишних и попробуйте снова."
-ROSTER_NOT_MEMBERS = "Кто-то из заявки уже не в группе состава — выберите заявку заново: /game_pay"
+ROSTER_NOT_MEMBERS = "Кто-то из заявки уже не в группе состава — выберите заявку заново: /roster"
 GAME_PAYMENT_PREVIEW = (
-    "Так будет в группе — состав, пост и опрос «Оплатил»:\n\n{roster}\n\n➖➖➖\n\n{post}\n\n"
+    "Опубликованный состав и условия сбора:\n\n{roster}\n\n➖➖➖\n\n{post}\n\n"
     "Реквизиты и сумма верны? Опубликовать?"
 )
 GAME_PAYMENT_BTN_PUBLISH = "✅ Опубликовать"

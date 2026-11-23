@@ -789,8 +789,12 @@ async def test_game_pay_with_suggested_amount_and_new_details(
 
     await harness.private(COACH, "/game_pay")
     await harness.press(COACH, ItemAction(kind="gp", action="match", item_id=match.id).pack())
+    assert harness.session.texts_to(COACH)[-1] == ru.ROSTER_REQUIRED
+    await harness.press(COACH, ItemAction(kind="roster", action="match", item_id=match.id).pack())
     assert "Отмечено: <b>2</b> из 12" in harness.session.texts_to(COACH)[-1]
-    await harness.press(COACH, RosterPick(action="done").pack())
+    await harness.press(COACH, RosterPick(event_id=match.id, action="done").pack())
+    assert harness.session.texts_to(COACH)[-1] == "Состав опубликован."
+    await harness.press(COACH, ItemAction(kind="gp", action="pay", item_id=match.id).pack())
     assert "15 000 ₽ ÷ 2 = <b>7 500 ₽</b>" in harness.session.texts_to(COACH)[-1]
     await harness.press(COACH, Choice(flow="gp_amount", value="suggested").pack())
     await harness.press(COACH, Choice(flow="gp_deadline", value="day").pack())
@@ -872,9 +876,10 @@ def _roster_screen(harness: Harness) -> tuple[str, list[str]]:
     raise AssertionError("экрана заявки нет")
 
 
-def _done_button(harness: Harness) -> str:
-    """Текст кнопки «Готово…» на экране заявки."""
-    return next(label for label in _roster_screen(harness)[1] if "Готово" in label)
+async def _start_notice_payment(harness: Harness, services: Services) -> None:
+    coach = await ctx_of(services, COACH)
+    [match] = await services.game_payments.matches(coach, 1)
+    await harness.press(COACH, ItemAction(kind="gp", action="quick", item_id=match.id).pack())
 
 
 async def test_start_collection_from_notice(
@@ -891,17 +896,30 @@ async def test_start_collection_from_notice(
     await harness.press(COACH, start)
     text = harness.session.texts_to(COACH)[-1]
     assert "Отмечено: <b>10</b> из 12" in text
-    assert "С игрока: <b>1 500 ₽</b> (15 000 ₽ ÷ 10)" in text and "+79991234567" in text
+    assert "+79991234567" not in text
     assert notifier.stopped_polls == []  # голосование ещё открыто
-    assert _done_button(harness) == ru.ROSTER_BTN_START_NOW
+    assert ru.ROSTER_BTN_DONE in _roster_screen(harness)[1]
 
     user10 = (await ctx_of(services, 10)).user.id
     user11 = (await ctx_of(services, 11)).user.id
-    await harness.press(COACH, RosterPick(action="t", user_id=user10).pack())  # убрать
-    assert "(15 000 ₽ ÷ 9)" in _roster_screen(harness)[0]  # сводка пересчитана
-    await harness.press(COACH, RosterPick(action="more").pack())
-    await harness.press(COACH, RosterPick(action="t", user_id=user11).pack())  # не голосовал
-    await harness.press(COACH, RosterPick(action="done").pack())
+    await harness.press(
+        COACH,
+        RosterPick(event_id=callbacks.parse(start).args[0], action="t", user_id=user10).pack(),
+    )  # убрать
+    assert "Отмечено: <b>9</b>" in _roster_screen(harness)[0]  # сводка пересчитана
+    await harness.press(
+        COACH, RosterPick(event_id=callbacks.parse(start).args[0], action="more").pack()
+    )
+    await harness.press(
+        COACH,
+        RosterPick(event_id=callbacks.parse(start).args[0], action="t", user_id=user11).pack(),
+    )  # не голосовал
+    await harness.press(
+        COACH, RosterPick(event_id=callbacks.parse(start).args[0], action="done").pack()
+    )
+    await _start_notice_payment(harness, services)
+    assert "С игрока: <b>1 500 ₽</b>" in harness.session.texts_to(COACH)[-1]
+    await harness.press(COACH, Choice(flow="gp_pub", value="start").pack())
     assert harness.session.texts_to(COACH)[-1] == ru.GAME_PAYMENT_CREATED
 
     roster_post, post = (m.text for m in notifier.to(GROUP_ID)[-2:])
@@ -922,9 +940,11 @@ async def test_start_collection_without_price_and_details(
     coach = await ctx_of(services, COACH)
 
     await harness.press(COACH, start)
-    assert ru.ROSTER_START_NO_PRICE in harness.session.texts_to(COACH)[-1]
-    assert _done_button(harness) == ru.ROSTER_BTN_ASK_PRICE
-    await harness.press(COACH, RosterPick(action="done").pack())
+    assert ru.ROSTER_BTN_DONE in _roster_screen(harness)[1]
+    await harness.press(
+        COACH, RosterPick(event_id=callbacks.parse(start).args[0], action="done").pack()
+    )
+    await _start_notice_payment(harness, services)
     assert harness.session.texts_to(COACH)[-1] == ru.GAME_PAYMENT_ASK_GAME_PRICE
     await harness.private(COACH, "15 000")
     await harness.press(COACH, Choice(flow="pd_method", value="card").pack())
@@ -933,7 +953,7 @@ async def test_start_collection_without_price_and_details(
     await harness.press(COACH, Choice(flow="gp_save", value="no").pack())
     summary = harness.session.texts_to(COACH)[-1]
     assert "С игрока: <b>1 500 ₽</b>" in summary and "4111 1111 1111 1111" in summary
-    assert notifier.stopped_polls == []
+    assert notifier.stopped_polls == [(GROUP_ID, 1001)]
     await harness.press(COACH, Choice(flow="gp_pub", value="start").pack())
 
     post = notifier.to(GROUP_ID)[-1].text
@@ -954,12 +974,68 @@ async def test_start_collection_price_entered_with_details(
     await services.game_payments.add_details(await ctx_of(services, COACH), DETAILS)
 
     await harness.press(COACH, start)
-    await harness.press(COACH, RosterPick(action="done").pack())
+    await harness.press(
+        COACH, RosterPick(event_id=callbacks.parse(start).args[0], action="done").pack()
+    )
+    await _start_notice_payment(harness, services)
     await harness.private(COACH, "12000")
     assert "С игрока: <b>1 200 ₽</b>" in harness.session.texts_to(COACH)[-1]
     await harness.press(COACH, Choice(flow="gp_pub", value="start").pack())
     assert harness.session.texts_to(COACH)[-1] == ru.GAME_PAYMENT_CREATED
     assert "Сумма: 1 200 ₽" in notifier.to(GROUP_ID)[-1].text
+
+
+async def test_friendly_roster_free_then_payment(
+    harness: Harness, services: Services, notifier: FakeNotifier
+) -> None:
+    await bind(harness)
+    await harness.member(1, joined=True)
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    squad = await services.squads.squad_for_chat(GROUP_ID)
+    assert squad is not None
+    match = await services.events.create(
+        admin,
+        EventCreate(
+            squad_id=squad.id,
+            type="match",
+            title="Товарищеская игра",
+            starts_at=datetime.now(UTC) + timedelta(days=2),
+            notify_group=True,
+        ),
+    )
+    await services.polls.record_answer("poll-1", 1, [1])
+    select = ItemAction(kind="roster", action="match", item_id=match.id).pack()
+    await harness.private(ADMIN_TG_ID, "/roster")
+    await harness.press(ADMIN_TG_ID, select)
+    await harness.press(ADMIN_TG_ID, RosterPick(event_id=match.id, action="done").pack())
+    assert ru.ROSTER_PAYMENT_QUESTION in harness.session.texts_to(ADMIN_TG_ID)[-1]
+    assert notifier.stopped_polls == [(GROUP_ID, 1001)]
+    await harness.press(ADMIN_TG_ID, ItemAction(kind="gp", action="free", item_id=match.id).pack())
+    assert (await services.events.get(match.id)).payment_required is False
+    assert await services.game_payments.status(admin, match.id) is None
+    await harness.private(ADMIN_TG_ID, "/roster")
+    await harness.press(ADMIN_TG_ID, select)
+    assert "Состав на матч" in harness.session.texts_to(ADMIN_TG_ID)[-1]
+    await harness.private(ADMIN_TG_ID, "/game_pay")
+    await harness.press(ADMIN_TG_ID, ItemAction(kind="gp", action="match", item_id=match.id).pack())
+    assert harness.session.texts_to(ADMIN_TG_ID)[-1] == ru.ROSTER_FREE
+    await harness.press(ADMIN_TG_ID, ItemAction(kind="gp", action="pay", item_id=match.id).pack())
+    assert harness.session.texts_to(ADMIN_TG_ID)[-1] == ru.GAME_PAYMENT_ASK_AMOUNT
+    assert sum("Состав на матч" in m.text for m in notifier.to(GROUP_ID)) == 1
+    assert len(notifier.polls) == 1
+    await harness.private(ADMIN_TG_ID, "500")
+    await harness.press(ADMIN_TG_ID, Choice(flow="gp_deadline", value="day").pack())
+    await harness.press(ADMIN_TG_ID, Choice(flow="gp_collector", value=str(admin.user.id)).pack())
+    await harness.press(ADMIN_TG_ID, Choice(flow="pd_method", value="card").pack())
+    await harness.private(ADMIN_TG_ID, "4111 1111 1111 1111")
+    await harness.private(ADMIN_TG_ID, "Т-Банк")
+    await harness.press(ADMIN_TG_ID, Choice(flow="gp_save", value="no").pack())
+    await harness.press(ADMIN_TG_ID, Choice(flow="gp_pub", value="yes").pack())
+    assert len(notifier.polls) == 2
+    assert sum("Состав на матч" in m.text for m in notifier.to(GROUP_ID)) == 1
+    await harness.private(ADMIN_TG_ID, "/game_pay")
+    await harness.press(ADMIN_TG_ID, ItemAction(kind="gp", action="match", item_id=match.id).pack())
+    assert "Не оплатили (1)" in harness.session.texts_to(ADMIN_TG_ID)[-1]
 
 
 async def test_permissions_admin_toggles_role(
@@ -1281,7 +1357,7 @@ async def test_command_menu_follows_permissions(
     await harness.private(player_tg, "/help")
     await harness.private(coach_tg, "/help")
     assert "game_pay" not in menu(player_tg) and "attendance" in menu(player_tg)
-    assert {"game_pay", "event_add", "schedule"} <= set(menu(coach_tg))
+    assert {"roster", "game_pay", "event_add", "schedule"} <= set(menu(coach_tg))
     requests = len(harness.session.requests)
     await harness.private(player_tg, "/help")  # меню не менялось — повторно не ставится
     assert not any(isinstance(r, SetMyCommands) for r in harness.session.requests[requests:])

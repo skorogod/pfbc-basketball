@@ -365,7 +365,8 @@ class EventService:
             event.starts_at = new_starts_at
             if place is not None:
                 event.place = place
-            poll = await self._active_poll(uow, event)
+            # У подтверждённой заявки сохраняем закрытый опрос для сводки посещаемости.
+            poll = await self._active_poll(uow, event) if event.roster_player_ids is None else None
             if poll is not None:
                 await uow.polls.supersede(poll, now)
             old_pin = _take_pin(event)  # старый пост с прежним временем — открепляется
@@ -417,7 +418,7 @@ class EventService:
         posted = await self._post_pinned(dto, destination, text)
         poll_posted = (
             await self._publish_poll(dto, tz, destination) is not None
-            if dto.type in EVENT_POLLS
+            if dto.type in EVENT_POLLS and dto.roster_player_ids is None
             else None
         )
         return dto.model_copy(update={"posted": posted, "poll_posted": poll_posted})
@@ -573,7 +574,7 @@ class EventService:
         в группу (если событие публиковалось) и тренерам/капитанам в личку."""
         now = now or utcnow()
         async with self._uow_factory() as uow:
-            event = await uow.events.get(event_id)
+            event = await uow.events.get(event_id, for_update=True)
             if event is None:
                 raise NotFound("Событие не найдено")
             self._require_for(actor, event.squad_id, event.type)

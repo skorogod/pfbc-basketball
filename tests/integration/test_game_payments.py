@@ -230,6 +230,17 @@ async def test_payment_status_in_summary_absent_without_payment(
     assert [m.id for m in await services.game_payments.matches(coach, 1, now=NOW)] == [match_id]
 
 
+async def test_match_lists_only_include_games_before_kickoff(
+    services: Services, match_id: int
+) -> None:
+    coach = await ctx_of(services, COACH)
+    kickoff = at(12)
+    before = await services.game_payments.matches(coach, 1, now=kickoff - timedelta.resolution)
+    assert [event.id for event in before] == [match_id]
+    for now in (kickoff, kickoff + timedelta(minutes=15), kickoff + timedelta(days=1)):
+        assert await services.game_payments.matches(coach, 1, now=now) == []
+
+
 async def test_admin_collects_for_coach(
     services: Services, notifier: FakeNotifier, match_id: int, roster: list[int]
 ) -> None:

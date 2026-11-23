@@ -60,6 +60,9 @@ class EventDTO(DTO):
     description: str | None
     notify_group: bool
     tournament_id: int | None = None
+    match_id: int | None = None
+    roster_player_ids: list[int] | None = None
+    payment_required: bool | None = None
     tournament_title: str | None = None  # для матча — название его турнира
     # результат публикации в группе (только у только что созданного/перенесённого события)
     posted: bool | None = None
