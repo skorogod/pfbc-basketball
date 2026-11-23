@@ -15,6 +15,7 @@ from pfbc_bot.bot.helpers import ask_squad, callback_message
 from pfbc_bot.bot.keyboards.common import Choice, SquadPick, choices_keyboard, skip_keyboard
 from pfbc_bot.bot.states import Registration
 from pfbc_bot.domain.dates import parse_date
+from pfbc_bot.domain.enums import SquadRole
 from pfbc_bot.domain.payments import normalize_phone
 from pfbc_bot.domain.permissions import Permission
 from pfbc_bot.schemas.squads import SquadDTO, UserContext
@@ -38,6 +39,10 @@ INVITE_FLOW = "invite"
 def help_text(ctx: UserContext) -> str:
     """Команды по правам пользователя: что доступно — то и показываем."""
     text = ru.HELP_PLAYER
+    if ctx.is_allowed:
+        text += ru.HELP_POSTMATCH
+        if ctx.is_admin or ctx.squads_with_roles(SquadRole.COACH):
+            text += ru.HELP_POSTMATCH_STAFF
     perms = [p for p in Permission if ctx.can_anywhere(p)]
     if Permission.EVENTS in perms and Permission.MEETINGS in perms:
         perms.remove(Permission.MEETINGS)  # /event_add уже в справке «события»

@@ -206,7 +206,7 @@ def make_snapshot(
             rows = [row for row in rows if row["id"] == player]
         sanitized.append({**game, "rows": rows})
     return {
-        "layout": 10,
+        "layout": 13,
         "visibility": visibility,
         "squad": squad,
         "anchor": anchor,
@@ -229,8 +229,8 @@ _BANNER = ParagraphStyle(
     "banner",
     parent=_HEADINGS[0],
     textColor=colors.white,
-    fontSize=22,
-    leading=27,
+    fontSize=19,
+    leading=24,
     spaceBefore=0,
     spaceAfter=0,
 )
@@ -248,8 +248,19 @@ _SUB = ParagraphStyle("sub", parent=_BODY, textColor=_MUTED, fontSize=9, leading
 
 def _banner(doc: list[Flowable], label: str, title: str, subtitle: str) -> None:
     sub = ParagraphStyle("banner-sub", parent=_BODY, textColor=colors.white, spaceAfter=0)
+    squad_style = ParagraphStyle(
+        "banner-squad",
+        parent=sub,
+        fontSize=8,
+        leading=11,
+        textColor=colors.HexColor("#BAC0C7"),
+    )
+    subtitle_lines = [
+        [_paragraph(line, squad_style if line.startswith("Состав: ") else sub)]
+        for line in subtitle.splitlines()
+    ]
     panel = Table(
-        [[_paragraph(label, _KICKER)], [_paragraph(title, _BANNER)], [_paragraph(subtitle, sub)]],
+        [[_paragraph(label, _KICKER)], [_paragraph(title, _BANNER)], *subtitle_lines],
         colWidths=[_WIDTH],
         style=[
             ("BACKGROUND", (0, 0), (-1, -1), _INK),
@@ -486,12 +497,12 @@ def _pdf(snapshot: Row, as_of: str) -> bytes:
     if games:
         last = games[-1]
         stats = last["stats"]
-        fixture = f"{last['squad']} — {last['opponent']}"
+        fixture = f"PFBC vs {last['opponent']}"
         _banner(
             doc,
             title.upper(),
             name if player else fixture,
-            f"{last['date']}  ·  {fixture if player else 'Последний матч'}",
+            (f"{fixture}\n" if player else "") + f"Состав: {last['squad']}\n{last['date']}",
         )
         if player:
             doc.append(_player_metrics([last]))
@@ -529,7 +540,12 @@ def _pdf(snapshot: Row, as_of: str) -> bytes:
             _player_comments(doc, [last])
         doc.append(PageBreak())
         dates = f"{games[0]['date']} — {last['date']}"
-        _banner(doc, "ДИНАМИКА ЗА ПЕРИОД", name if player else snapshot["squad"], dates)
+        _banner(
+            doc,
+            "ДИНАМИКА ЗА ПЕРИОД",
+            name if player else "PFBC",
+            f"Состав: {snapshot['squad']}\n{dates}",
+        )
         if player:
             doc.append(_player_metrics(games, period=True))
             _details(doc, snapshot, "Анкеты игрока за период")
@@ -550,10 +566,7 @@ def _pdf(snapshot: Row, as_of: str) -> bytes:
             trend_block: list[Flowable] = [
                 _paragraph("Динамика показателей", _HEADINGS[2]),
             ]
-            if any(g["stats"]["n"] for g in batch):
-                trend_block.append(charts.trends(batch, name, _WIDTH))
-            else:
-                trend_block.append(_paragraph("Нет данных"))
+            trend_block.append(charts.trends(batch, name, _WIDTH))
             table = [["Дата", "Соперник", "Ответы / участники", "Нагрузка / 10", "Самооценка / 5"]]
             for game in batch:
                 stats = game["stats"]

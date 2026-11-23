@@ -3,6 +3,7 @@
 import io
 from collections.abc import Sequence
 from statistics import mean
+from textwrap import fill
 from typing import Any
 
 from matplotlib.axes import Axes
@@ -123,7 +124,8 @@ def distribution(game: dict[str, Any], width: float, *, player: bool = False) ->
 
 
 def trends(games: list[dict[str, Any]], player_name: str, width: float) -> Image:
-    fig = Figure(figsize=(width / 72, 4.6), layout="constrained")
+    fig = Figure(figsize=(width / 72, 4.6))
+    fig.set_layout_engine("constrained", rect=(0, 0.12, 1, 0.88))
     grid = fig.add_gridspec(2, 2)
     axes = [fig.add_subplot(grid[0, :]), fig.add_subplot(grid[1, 0])]
     for ax, q, limit, label in zip(
@@ -159,12 +161,8 @@ def trends(games: list[dict[str, Any]], player_name: str, width: float) -> Image
             ]
             ax.plot(x, personal, "D--", color="#a14468", lw=1.4, ms=3.7, label=player_name)
             ax.legend(loc="upper left", fontsize=6.5, framealpha=0.9)
-        ticks = []
-        for game in games:
-            opponent = game["opponent"]
-            short = opponent[:7] + "…" if len(opponent) > 8 else opponent
-            ticks.append(f"{game['date'][:5]}\n{short}")
-        ax.set(xticks=x, xticklabels=ticks, xlim=(-0.35, len(x) - 0.65), ylim=(0.85, limit + 0.15))
+        _match_axis(ax, games)
+        ax.set_ylim(0.85, limit + 0.15)
         ax.set_yticks(range(1, limit + 1, 2) if limit == 10 else range(1, 6))
         if limit == 10:
             ax.set_yticks([1, 3, 5, 7, 9, 10])
@@ -238,8 +236,6 @@ def _bars(
 def _time_distribution(ax: Axes, game: dict[str, Any], *, player: bool = False) -> None:
     _axes(ax, "Игровое время", "Удовлетворённость временем", "Кол-во игроков")
     counts = game["stats"].get("playing_time", {})
-    if not sum(counts.values()):
-        ax.text(0.5, 0.5, "Нет данных", transform=ax.transAxes, ha="center")
     values = [counts.get(code, 0) for code in PLAYING_TIME_OPTIONS]
     bars = ax.bar(range(3), values, color=["#ada5dc", "#796cbc", "#43397f"], width=0.6)
     ax.bar_label(bars, labels=[str(v) if v else "" for v in values], padding=2, fontsize=8)
@@ -265,7 +261,10 @@ def _time_trend(ax: Axes, games: list[dict[str, Any]], *, player: bool = False) 
     for (code, label), color in zip(
         PLAYING_TIME_OPTIONS.items(), ("#bd4d32", "#e5bd4f", "#398565"), strict=True
     ):
-        values = [100 * c.get(code, 0) / n if n else 0 for c, n in zip(counts, totals, strict=True)]
+        values = [
+            100 * c.get(code, 0) / n if n else float("nan")
+            for c, n in zip(counts, totals, strict=True)
+        ]
         ax.bar(
             x,
             values,
@@ -278,21 +277,19 @@ def _time_trend(ax: Axes, games: list[dict[str, Any]], *, player: bool = False) 
         )
         bottom = [b + v for b, v in zip(bottom, values, strict=True)]
     for i, n in enumerate(totals):
-        ax.text(i, 102 if n else 45, f"n={n}" if n else "Нет\nданных", ha="center", fontsize=6)
+        if n:
+            ax.text(i, 102, f"n={n}", ha="center", fontsize=6)
     ax.set(
-        xticks=x,
-        xticklabels=[f"{g['date'][:5]}\n{g['opponent'][:7]}" for g in games],
         ylim=(0, 112),
         yticks=[0, 25, 50, 75, 100],
     )
-    ax.tick_params(axis="x", labelsize=6.5)
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.3), fontsize=6, frameon=False)
+    _match_axis(ax, games)
 
     # Measure the final axes in points: small segments get leader-line labels.
     assert isinstance(ax.figure, Figure)
     ax.figure.draw_without_rendering()
     height_points = ax.get_window_extent().height * 72 / ax.figure.dpi
-    min_height = 9 * 112 / height_points
+    min_height = 9 * ax.get_ylim()[1] / height_points
     for i, (counts_for_game, total) in enumerate(zip(counts, totals, strict=True)):
         if not total:
             continue
@@ -360,16 +357,34 @@ def _time_trend(ax: Axes, games: list[dict[str, Any]], *, player: bool = False) 
                     _player_dot(ax, i - 0.19, low + value / 2)
                     break
                 low += value
-        handles, labels = ax.get_legend_handles_labels()
-        unique = dict(zip(labels, handles, strict=True))
-        ax.legend(
-            unique.values(),
-            unique.keys(),
-            loc="upper center",
-            bbox_to_anchor=(0.5, -0.3),
-            fontsize=6,
-            frameon=False,
-        )
+    handles, labels = ax.get_legend_handles_labels()
+    unique = dict(zip(labels, handles, strict=True))
+    ax.figure.legend(
+        unique.values(),
+        unique.keys(),
+        loc="lower center",
+        bbox_to_anchor=(0.76, 0.005),
+        fontsize=6,
+        frameon=False,
+    )
+
+
+def _match_axis(ax: Axes, games: list[dict[str, Any]]) -> None:
+    # Keep real matches centered in a minimum five-slot viewport, without fake ticks.
+    count = len(games)
+    span = max(5, count)
+    center = (count - 1) / 2
+    labels = []
+    for game in games:
+        opponent = game["opponent"]
+        short = opponent[:15] + "…" if len(opponent) > 16 else opponent
+        labels.append(f"{game['date'][:5]}\n{fill(short, width=10)}")
+    ax.set(xticks=range(count), xticklabels=labels, xlim=(center - span / 2, center + span / 2))
+    ax.tick_params(axis="x", labelsize=6)
+    for tick in ax.get_xticklabels():
+        tick.set_rotation(0)
+        tick.set_horizontalalignment("center")
+        tick.set_rotation_mode("anchor")
 
 
 def _personal_answer(game: dict[str, Any], key: str) -> Any:

@@ -236,9 +236,14 @@ class PostMatchService:
                     date = format_local(event.starts_at, squad.timezone)
                     deadline = format_local(s.deadline, squad.timezone)
                     msg = (
-                        f"Матч {date} · {escape(event.title)}. Как прошла игра?\nДо {deadline}. "
+                        f"🏀 <b>Послематчевый опрос</b>\n\n"
+                        f"📅 {date} · <b>{escape(event.title)}</b>\n"
+                        f"⏰ <b>Ответьте до {deadline}</b>\n\n"
+                        "💬 <b>Как прошла игра?</b>\n\n"
+                        "👥 <b>Кто увидит ответы</b>\n"
                         "Команда увидит сводку, штаб — поимённые результаты. "
-                        "Самочувствие, боль и комментарий увидят только получившие допуск. "
+                        "Самочувствие, боль и комментарий увидят только получившие допуск.\n\n"
+                        "ℹ️ <b>После отправки</b>\n"
                         "Отправленный ответ изменить нельзя. Для удаления данных обратитесь "
                         "к админу. Скачанные копии остаются у получателей."
                     )
@@ -248,7 +253,7 @@ class PostMatchService:
                         else [[InlineButton("Продолжить", f"ps:{p.token}:0:start")]]
                     )
                     if p.notice == "reminder":
-                        msg = "Напоминание. " + msg
+                        msg = "🔔 <b>Напоминание.</b>\n\n" + msg
                 sent = await self.notifier.send_message(user.tg_user_id, msg, keyboard=kb)
                 p.attempts += 1
                 if sent:
@@ -284,7 +289,7 @@ class PostMatchService:
                     p.notice = None
                 elif action in ("absent", "declined"):
                     return (
-                        f"Подтвердить «{STATUS[action]}»? Решение окончательное.",
+                        f"❓ <b>Подтвердить «{STATUS[action]}»?</b>\n\nРешение окончательное.",
                         [
                             [InlineButton("Подтвердить", f"ps:{token}:0:yes_{action}")],
                             [InlineButton("Назад", f"ps:{token}:0:invite")],
@@ -298,7 +303,7 @@ class PostMatchService:
                     p.notice = None
                     await self._changed(uow, s, event, squad)
                     await uow.commit()
-                    return "Решение сохранено. " + STATUS[p.status] + ".", None, 0
+                    return "✅ <b>Решение сохранено.</b>\n\n" + STATUS[p.status] + ".", None, 0
                 else:
                     raise Conflict("Анкета ещё не начата.")
             elif p.status != "started":
@@ -320,7 +325,12 @@ class PostMatchService:
                 p.notice = None
                 await self._changed(uow, s, event, squad)
                 await uow.commit()
-                return "Спасибо! Ответ принят и зафиксирован.", None, 0
+                return (
+                    "✅ <b>Ответ принят!</b>\n\nСпасибо за обратную связь. "
+                    "Ответы сохранены, изменить их нельзя.",
+                    None,
+                    0,
+                )
             else:
                 answers = dict(p.answers)
                 p.step = advance(step, answers, action, value)
@@ -361,11 +371,16 @@ class PostMatchService:
                 "cancelled": "Отменён",
             }
             lines = [
-                escape(event.title),
-                labels[s.status],
-                f"Ответили {s.responses} из {s.participants}",
+                f"🏀 <b>{escape(event.title)}</b>",
+                "",
+                f"📋 <b>Статус:</b> {labels[s.status]}",
+                f"👥 <b>Ответили {s.responses} из {s.participants}</b>",
+                "",
+                "<b>Участники опроса</b>" if players else "Участников пока нет.",
             ]
-            lines.extend(f"{escape(name)} — {STATUS[status]}" for name, status in players.values())
+            lines.extend(
+                f"• <b>{escape(name)}</b> — {STATUS[status]}" for name, status in players.values()
+            )
             for _, user in await uow.members.list_active_for_squad(squad.id):
                 players.setdefault(
                     user.id, (to_dto(user).display_name, "invited" if user.id in roster else "new")

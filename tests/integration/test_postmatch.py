@@ -228,7 +228,7 @@ async def test_schedule_reminder_and_deadline(
         assert s and s.reason == "deadline" and (s.responses, s.participants) == (0, 1)
     await svc.reports.process()
     doc = PdfReader(notifier.to(CHAT_ID)[-1].text)
-    assert sum(len(page.images) for page in doc.pages) == 0
+    assert sum(len(page.images) for page in doc.pages) == 1  # Empty-match trend positions.
     first_page = doc.pages[0].extract_text()
     assert "Нет данных" in first_page
     assert "0/1" in first_page

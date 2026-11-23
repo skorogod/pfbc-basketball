@@ -83,6 +83,8 @@ HELP_PLAYER = (
     "/events — ближайшие события\n"
     "/delete_me — удалить персональные данные"
 )
+HELP_POSTMATCH = "\n/postmatch — послематчевые анкеты и отчёты"
+HELP_POSTMATCH_STAFF = "\nУправление участниками опроса и отчёты команды доступны в этом меню."
 HELP_FUNCTIONS = "\n\n<b>Ваши функции</b>"
 # право → строки справки (ключ — код права из domain.permissions)
 HELP_BY_PERMISSION: dict[str, str] = {

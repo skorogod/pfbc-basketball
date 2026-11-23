@@ -50,7 +50,7 @@ class Notifier(Protocol):
         ...
 
     async def send_document(
-        self, chat_id: int, path: str, *, thread_id: int | None = None
+        self, chat_id: int, path: str, *, thread_id: int | None = None, filename: str | None = None
     ) -> bool: ...
 
     async def send_poll(

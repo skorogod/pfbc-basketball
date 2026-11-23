@@ -26,6 +26,17 @@ QUESTIONS = {
     6: "Какие командные элементы хотите отработать?",
     7: "Есть ли комментарий? Введите до 1000 символов.",
 }
+QUESTION_LABELS = {
+    PLAYING_TIME: "⏳ Игровое время",
+    1: "💪 Нагрузка",
+    2: "🙂 Самочувствие",
+    3: "🩹 Боль и дискомфорт",
+    4: "⭐ Самооценка",
+    5: "🏀 Индивидуальные навыки",
+    6: "🤝 Командные элементы",
+    7: "💬 Комментарий",
+}
+
 OPTIONS = {
     PLAYING_TIME: PLAYING_TIME_OPTIONS,
     1: {str(i): str(i) for i in range(1, 11)},
@@ -111,28 +122,43 @@ def form(token: str, step: int, answers: dict[str, Any]) -> tuple[str, Keyboard]
 
     rows = []
     if step == REVIEW:
-        text = "Проверьте ответы. После отправки изменить их нельзя.\n" + "\n".join(
-            f"{n}. {escape(answer_label(i, answers))}" for n, i in enumerate(QUESTION_ORDER, 1)
-        )
-        rows.append([button("Отправить", "submit")])
+        blocks = ["📋 <b>Проверьте ответы</b>"]
+        for question in QUESTION_ORDER:
+            answer = answer_label(question, answers)
+            if question in (1, 4) and str(question) in answers:
+                answer += " из " + ("10" if question == 1 else "5")
+            blocks.append(f"<b>{QUESTION_LABELS[question]}:</b> {escape(answer)}")
+        blocks.append("После отправки изменить ответы нельзя.")
+        text = "\n\n".join(blocks)
+        rows.append([button("✅ Отправить", "submit")])
     elif step == PAIN_DETAIL:
-        text = "Вопрос 4 из 8 · Где ощущается боль? Можно пропустить."
+        text = "📋 <b>Вопрос 4 из 8</b>\n\n🩹 <b>Где ощущается боль?</b>\n\nМожно пропустить."
     else:
-        text = f"Вопрос {QUESTION_ORDER.index(step) + 1} из 8 · {QUESTIONS[step]}"
+        emoji = QUESTION_LABELS[step].split()[0]
+        text = (
+            f"📋 <b>Вопрос {QUESTION_ORDER.index(step) + 1} из 8</b>\n\n"
+            f"{emoji} <b>{QUESTIONS[step]}</b>"
+        )
+        if step in (5, 6):
+            text += "\n\nВыберите несколько вариантов и нажмите «Готово»."
+        elif step == 7:
+            text += "\n\nМожно пропустить."
+        else:
+            text += "\n\nВыберите один вариант."
         buttons = []
         for code, label in OPTIONS.get(step, {}).items():
             if step in (5, 6) and code in answers.get(str(step), []):
-                label = "✓ " + label
+                label = "✅ " + label
             buttons.append(button(label, code))
         width = 5 if step in (1, 4) else 1 if step == PLAYING_TIME else 2
         rows.extend(buttons[i : i + width] for i in range(0, len(buttons), width))
         if step in (5, 6):
-            none = "✓ Ничего" if answers.get(str(step)) == ["none"] else "Ничего"
-            rows.append([button(none, "none"), button("Готово", "done")])
+            none = "✅ Ничего" if answers.get(str(step)) == ["none"] else "Ничего"
+            rows.append([button(none, "none"), button("✅ Готово", "done")])
     if step in (5, 6, 7, PAIN_DETAIL):
-        rows.append([button("Пропустить", "skip")])
+        rows.append([button("⏭ Пропустить", "skip")])
     if step != PLAYING_TIME:
-        rows.append([button("Назад", "back")])
+        rows.append([button("⬅️ Назад", "back")])
     return text, rows
 
 

@@ -142,13 +142,15 @@ class TelegramNotifier:
             return False
         return True
 
-    async def send_document(self, chat_id: int, path: str, *, thread_id: int | None = None) -> bool:
+    async def send_document(
+        self, chat_id: int, path: str, *, thread_id: int | None = None, filename: str | None = None
+    ) -> bool:
         try:
             await self._with_thread_fallback(
                 thread_id,
                 lambda tid: self._bot.send_document(
                     chat_id,
-                    FSInputFile(path, filename="Отчёт." + path.rsplit(".", 1)[-1]),
+                    FSInputFile(path, filename=filename or "Отчёт." + path.rsplit(".", 1)[-1]),
                     message_thread_id=tid,
                 ),
             )

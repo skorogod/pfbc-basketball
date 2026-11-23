@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,19 @@ async def game_snapshot(
         "rows": rows,
         "stats": summarize(rows),
     }
+
+
+def report_filename(snapshot: dict[str, Any], kind: str) -> str:
+    games = snapshot.get("games", [])
+    opponent = games[-1]["opponent"] if games else ""
+    if snapshot.get("player"):
+        label = snapshot.get("player_name") or "Отчёт игрока"
+    else:
+        label = "общий" if snapshot.get("visibility") == "group" else "штаб"
+    title = f"PFBC vs {opponent} {label}" if opponent else f"PFBC {label}"
+    title = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', " ", title)
+    title = " ".join(title.split()).strip(" .") or "Отчёт"
+    return f"{title[:100].rstrip(' .')}.{kind}"
 
 
 class SurveyReports:
@@ -305,9 +319,9 @@ class SurveyReports:
             ready = await self._queue(uow, squad, snapshot, kind, ctx.user.tg_user_id, False)
             await uow.commit()
             return (
-                "Отчёт готов, отправляю."
+                "✅ <b>Отчёт готов, отправляю.</b>"
                 if ready
-                else "Отчёт готовится. Пришлю его сюда, когда он будет готов."
+                else "⏳ <b>Отчёт готовится.</b>\n\nПришлю его сюда, когда он будет готов."
             )
 
     async def _refresh_legacy(self, uow: UnitOfWork, report: SurveyReport) -> None:
@@ -498,7 +512,10 @@ class SurveyReports:
                 delivery.status = "revoked"
             else:
                 sent = await self.notifier.send_document(
-                    delivery.chat_id, str(self.path(report)), thread_id=thread
+                    delivery.chat_id,
+                    str(self.path(report)),
+                    thread_id=thread,
+                    filename=report_filename(report.snapshot, report.kind),
                 )
                 delivery.attempts += 1
                 if sent:

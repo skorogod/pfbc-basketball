@@ -31,6 +31,9 @@ def test_pdf_pagination_and_visibility() -> None:
         )
         pages = PdfReader(io.BytesIO(render_report(snapshot, "pdf", "22.11.2026"))).pages
         texts = [page.extract_text() for page in pages]
+        assert "PFBC vs Соперник" in texts[0]
+        assert "Состав: Состав" in texts[0]
+        assert snapshot["layout"] == 13
         assert ("Кол-во ответивших игроков" in texts[0]) == (visibility != "player")
         if player:
             assert "Анкета за последний матч" in texts[0]
@@ -168,7 +171,7 @@ def test_small_playing_time_segments_have_callouts(monkeypatch) -> None:
     assert all(t.get_text() == "<1%" and t.arrow_patch for t in callouts)
     assert callouts[0].get_position()[1] < callouts[1].get_position()[1]
     assert "100%" in [t.get_text() for t in labels]
-    assert "Нет\nданных" in [t.get_text() for t in labels]
+    assert "Нет\nданных" not in [t.get_text() for t in labels]
     assert "0%" not in [t.get_text() for t in labels]
 
 
@@ -233,3 +236,88 @@ def test_unsubmitted_answers_are_dashes_in_tables() -> None:
     assert "Статус" not in [cell.getPlainText() for cell in table._cellvalues[0]]
     assert [cell.getPlainText() for cell in table._cellvalues[1][1:]] == ["—"] * 7
     assert len(doc) == 2  # No draft comments after the table.
+
+
+def test_trend_scale_labels_and_missing_answers(monkeypatch) -> None:
+    import math
+
+    from pfbc_bot.services import survey_charts as charts
+
+    monkeypatch.setattr(charts, "_image", lambda fig: fig)
+    games = []
+    for status, team, time in [
+        ("submitted", True, True),
+        ("started", False, False),
+        ("started", True, False),
+        ("submitted", True, False),
+        ("submitted", True, True),
+    ]:
+        rows = [
+            {
+                "id": 1,
+                "status": status,
+                "answers": {
+                    "1": "6",
+                    "4": "4",
+                    **({charts.PLAYING_TIME_KEY: "more"} if time else {}),
+                },
+            }
+        ]
+        games.append(
+            {
+                "date": "23.11.2026",
+                "opponent": "Очень длинный соперник баскетбол",
+                "rows": rows,
+                "stats": {
+                    "scores": {"1": [6] if team else [], "4": [4] if team else []},
+                    "playing_time": {"more": 1} if team else {},
+                },
+            }
+        )
+    for count in (1, 5):
+        fig = charts.trends(games[:count], "Игрок", 510)
+        for ax in fig.axes:
+            assert ax.get_xlim() == ((count - 1) / 2 - 2.5, (count - 1) / 2 + 2.5)
+            assert len(ax.get_xticks()) == count
+            assert all(
+                t.get_fontsize() == 6 and t.get_rotation() == 0 and t.get_ha() == "center"
+                for t in ax.get_xticklabels()
+            )
+            assert ax.get_xticklabels()[0].get_text() == "23.11\nОчень\nдлинный с…"
+        assert all(abs(p.get_width() - 0.58) < 1e-9 for p in fig.axes[2].patches)
+    for ax in fig.axes[:2]:
+        assert math.isnan(ax.lines[0].get_ydata()[1])
+        assert math.isnan(ax.lines[1].get_ydata()[1])
+        assert math.isnan(ax.lines[1].get_ydata()[2])
+        assert "Нет\nданных" not in [t.get_text() for t in ax.texts]
+        assert "Нет ответа\nигрока" not in [t.get_text() for t in ax.texts]
+    time_ax = fig.axes[2]
+    assert math.isnan(time_ax.patches[1].get_height())
+    assert "Нет данных\nигрока" not in [t.get_text() for t in time_ax.texts]
+    assert len(time_ax.lines) == 2
+
+
+def test_empty_charts_have_gaps_without_missing_data_labels(monkeypatch) -> None:
+    import math
+
+    from pfbc_bot.services import survey_charts as charts
+
+    monkeypatch.setattr(charts, "_image", lambda fig: fig)
+    game = {
+        "date": "23.11.2026",
+        "opponent": "Атлант",
+        "rows": [],
+        "stats": summarize([]),
+    }
+    for player in (False, True):
+        trend = charts.trends([game], "Игрок" if player else "", 510)
+        assert trend.axes[2].get_ylim() == (0, 112)
+        assert all(math.isnan(p.get_height()) for p in trend.axes[2].patches)
+        assert not trend.axes[2].lines
+        for ax in trend.axes[:2]:
+            assert all(math.isnan(v) for line in ax.lines for v in line.get_ydata())
+        distribution = charts.distribution(game, 510, player=player)
+        assert all(not ax.lines for ax in distribution.axes)
+        for fig in (trend, distribution):
+            for ax in fig.axes:
+                assert not any("Нет" in t.get_text() for t in ax.texts)
