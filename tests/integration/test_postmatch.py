@@ -5,7 +5,10 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from docx import Document
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from alembic.script import ScriptDirectory
+from pypdf import PdfReader
 from sqlalchemy import func, select
 
 from pfbc_bot.db.models import Event, MatchSurvey, ReportRecipient, SurveyPlayer, SurveyReport
@@ -82,9 +85,26 @@ async def test_survey_lifecycle(
     await asyncio.gather(svc.reports.request(coach, sid), svc.reports.request(other, sid))
     async with uow_factory() as uow:
         [report] = list(await uow.session.scalars(select(SurveyReport)))
-        assert report.snapshot["games"][0]["stats"]["n"] == 0
+        assert report.snapshot["games"][-1]["stats"]["n"] == 0
         assert await uow.session.scalar(select(func.count()).select_from(ReportRecipient)) == 2
+    # Черновик старой версии уже на подтверждении: новый ответ обязателен,
+    # прежние оценки остаются под исходными ключами.
+    async with uow_factory() as uow:
+        draft = await uow.session.scalar(
+            select(SurveyPlayer).where(SurveyPlayer.token == tokens[first.user.id])
+        )
+        draft.step = 8
+        draft.answers = {"1": "7", "2": "great", "3": "no", "4": "4"}
+        await uow.commit()
+    message, _, step = await action(first, 8, "submit")
+    assert step == 9 and "Вопрос 1 из 8" in message
+    async with uow_factory() as uow:
+        draft = await uow.session.scalar(
+            select(SurveyPlayer).where(SurveyPlayer.token == tokens[first.user.id])
+        )
+        assert draft.status == "started" and draft.answers["1"] == "7"
     for step, code, value in [
+        (9, "satisfied", None),
         (1, "7", None),
         (2, "great", None),
         (3, "pain", None),
@@ -98,9 +118,6 @@ async def test_survey_lifecycle(
     ]:
         await action(first, step, code, value)
     assert "уже принят" in (await action(first, 0, "start"))[0]
-    await services.settings.set_squad_value(
-        admin, squad.id, "survey_sensitive_users", f"[{coach.user.id}]"
-    )
     await action(second, 0, "yes_declined")
     async with uow_factory() as uow:
         s = await uow.session.get(MatchSurvey, sid)
@@ -111,19 +128,19 @@ async def test_survey_lifecycle(
             1,
         )
         reports = list(await uow.session.scalars(select(SurveyReport)))
-        final = [r for r in reports if r.snapshot["games"][0]["final"]]
-        assert len(final) == 3
+        final = [r for r in reports if r.snapshot["games"][-1]["final"]]
+        assert len(final) == 2
         for r in final:
-            game = r.snapshot["games"][0]
+            game = r.snapshot["games"][-1]
             assert game["stats"]["absent"] == game["stats"]["declined"] == 1
-            assert ("частный комментарий" in str(game)) == (r.visibility == "sensitive")
+            assert ("частный комментарий" in str(game)) == (r.visibility == "staff")
             if r.visibility == "group":
                 assert not game["rows"]
     await svc.reports.process()
     assert notifier.to(CHAT_ID)[-1].thread_id == 44
-    doc = Document(notifier.to(CHAT_ID)[-1].text)
-    assert len(doc.inline_shapes) == 2
-    assert not doc.tables
+    doc = PdfReader(notifier.to(CHAT_ID)[-1].text)
+    assert sum(len(page.images) for page in doc.pages) >= 4
+    assert all("ФИО" not in page.extract_text() for page in doc.pages)
     assert "готов, отправляю" in await svc.reports.request(coach, sid)
     await svc.reports.process()
     assert len([m for m in notifier.to(CHAT_ID) if m.thread_id == 44]) == 1
@@ -210,9 +227,13 @@ async def test_schedule_reminder_and_deadline(
         s = await uow.session.get(MatchSurvey, sid)
         assert s and s.reason == "deadline" and (s.responses, s.participants) == (0, 1)
     await svc.reports.process()
-    doc = Document(notifier.to(CHAT_ID)[-1].text)
-    assert len(doc.inline_shapes) == 0
-    assert any("Нет данных · Ответили 0 из 1" in p.text for p in doc.paragraphs)
+    doc = PdfReader(notifier.to(CHAT_ID)[-1].text)
+    assert sum(len(page.images) for page in doc.pages) == 0
+    first_page = doc.pages[0].extract_text()
+    assert "Нет данных" in first_page
+    assert "0/1" in first_page
+    assert "Ответили · 0" in first_page
+    assert "Без ответа · 1" in first_page
 
 
 async def test_history_periods_and_player_comparison(
@@ -256,9 +277,19 @@ async def test_history_periods_and_player_comparison(
                     }
                 uow.session.add(p)
             sid = s.id
+            if day == 3:
+                middle_sid, middle_event = s.id, e.id
         await uow.commit()
     with pytest.raises(PermissionDenied, match="Нет доступа"):
         await svc.reports.request(players[0], sid, period="5")
+    with pytest.raises(PermissionDenied):
+        await svc.reports.request(players[0], sid, player=players[1].user.id)
+    with pytest.raises(PermissionDenied):
+        await svc.reports.request(players[0], sid, player=players[0].user.id, kind="csv")
+    await svc.reports.request(players[1], sid, player=players[1].user.id)
+    assert (await svc.reports.own_surveys(players[1]))[0][0] == sid
+    assert set(await svc.reports.report_players(admin, sid)) == {ctx.user.id for ctx in players}
+    await svc.reports.request(admin, middle_sid, period="all")
     for period in ("5", "10", "20", "all", "2000-01-01..2000-01-02"):
         await svc.reports.request(admin, sid, period=period)
     await svc.reports.request(admin, sid, period="5", player=players[1].user.id)
@@ -270,15 +301,96 @@ async def test_history_periods_and_player_comparison(
             if r.kind == "csv":
                 continue
             if r.snapshot["player"]:
+                assert all(row["id"] == players[1].user.id for g in games for row in g["rows"])
                 assert [g["opponent"] for g in games] == ["M5", "M6"]
             elif r.snapshot["period"] == "5":
                 assert [g["opponent"] for g in games] == ["M2", "M3", "M4", "M5", "M6"]
             elif ".." in r.snapshot["period"]:
                 assert not games
+            elif r.snapshot["anchor"] == middle_event:
+                assert [g["opponent"] for g in games] == ["M1", "M2", "M3"]
             else:
                 assert len(games) == 6
     await svc.reports.process()
     files = [m.text for m in notifier.to(ADMIN_TG_ID)]
-    assert sum(name.endswith(".docx") for name in files) == 6
+    assert sum(name.endswith(".pdf") for name in files) == 7
     assert sum(name.endswith(".csv") for name in files) == 1
     assert len(notifier.to(ADMIN_TG_ID)) >= 7
+
+
+async def test_migrate_partial_docx_delivery(
+    services: Services, uow_factory: UowFactory, notifier: FakeNotifier, tmp_path: Path
+) -> None:
+    squad = await setup_squad(services)
+    reports = services.postmatch.reports
+    reports.directory = tmp_path
+    coach_chat = 77
+    await join(services, coach_chat, at=utcnow(), role=SquadRole.COACH)
+    async with uow_factory() as uow:
+        old = SurveyReport(
+            family="legacy",
+            key="legacy",
+            kind="docx",
+            visibility="staff",
+            squad_id=squad.id,
+            snapshot={
+                "title": "История матчей",
+                "games": [],
+                "history": True,
+                "period": "5",
+                "player": 0,
+                "visibility": "staff",
+                "player_name": "",
+            },
+            created_at=utcnow(),
+            expires_at=utcnow() + timedelta(days=1),
+            ready=True,
+        )
+        uow.session.add(old)
+        await uow.session.flush()
+        for chat, status, automatic in [
+            (76, "sent", True),
+            (ADMIN_TG_ID, "pending", False),
+            (coach_chat, "pending", True),
+        ]:
+            uow.session.add(
+                ReportRecipient(
+                    report_id=old.id, chat_id=chat, automatic=automatic, status=status, attempts=1
+                )
+            )
+        reports.path(old).write_bytes(b"legacy")
+        await uow.session.flush()
+
+        def migrate(conn):
+            scripts = ScriptDirectory("migrations")
+            with Operations.context(MigrationContext.configure(conn)):
+                scripts.get_revision("0020").module.upgrade()
+
+        conn = await uow.session.connection()
+        await conn.run_sync(migrate)
+        await conn.run_sync(migrate)
+        pdf = (
+            await uow.session.scalars(select(SurveyReport).where(SurveyReport.kind == "pdf"))
+        ).one()
+        assert pdf.snapshot == old.snapshot
+        pending = await uow.session.scalars(
+            select(ReportRecipient).where(ReportRecipient.report_id == pdf.id)
+        )
+        assert {(r.chat_id, r.automatic, r.attempts) for r in pending} == {
+            (ADMIN_TG_ID, False, 1),
+            (coach_chat, True, 1),
+        }
+        await uow.commit()
+
+    admin = await ctx_of(services, ADMIN_TG_ID)
+    coach = await ctx_of(services, coach_chat)
+    await services.squads.set_role(admin, squad.id, coach.user.id, SquadRole.COACH, grant=False)
+    await reports.process()
+    await reports.process()
+    assert [m.text for m in notifier.to(ADMIN_TG_ID) if m.text.endswith(".pdf")] == [
+        str(reports.path(pdf))
+    ]
+    assert not any(
+        m.text.endswith((".docx", ".pdf")) for chat in (76, coach_chat) for m in notifier.to(chat)
+    )
+    assert reports.path(old).is_file()

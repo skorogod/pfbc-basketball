@@ -47,3 +47,17 @@ def test_player_labels() -> None:
         2: "Иванов А.",
         3: "Петров",
     }
+
+
+@pytest.mark.parametrize("code", ["more", "less", "satisfied"])
+def test_playing_time_question(code: str) -> None:
+    from pfbc_bot.domain.postmatch import PLAYING_TIME, PLAYING_TIME_KEY, form
+
+    answers = {"1": "7", "4": "4"}
+    assert advance(PLAYING_TIME, answers, code, None) == 1
+    assert answers == {"1": "7", "4": "4", PLAYING_TIME_KEY: code}
+    assert advance(1, answers, "back", None) == PLAYING_TIME
+    assert "Вопрос 1 из 8" in form("token", PLAYING_TIME, answers)[0]
+    assert "Вопрос 2 из 8" in form("token", 1, answers)[0]
+    with pytest.raises(Conflict):
+        advance(PLAYING_TIME, answers, "skip", None)

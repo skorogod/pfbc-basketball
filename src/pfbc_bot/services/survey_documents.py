@@ -2,16 +2,41 @@
 
 import csv
 import io
+import json
 from collections import Counter, defaultdict
+from pathlib import Path
 from statistics import mean
 from typing import Any
+from xml.sax.saxutils import escape
 
-from docx import Document
-from docx.shared import Inches
-from matplotlib.figure import Figure
-from matplotlib.ticker import MaxNLocator
+from matplotlib import get_data_path
+from reportlab.graphics.shapes import Circle, Drawing, Group, Rect, String, Wedge
+from reportlab.graphics.shapes import Path as ShapePath
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import (
+    Flowable,
+    KeepTogether,
+    LongTable,
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
-from pfbc_bot.domain.postmatch import EXCLUDED, OPTIONS, STATUS, answer_label
+from pfbc_bot.domain.postmatch import (
+    EXCLUDED,
+    PLAYING_TIME,
+    PLAYING_TIME_KEY,
+    PLAYING_TIME_OPTIONS,
+    answer_label,
+)
+from pfbc_bot.services import survey_charts as charts
 
 Row = dict[str, Any]
 
@@ -20,6 +45,13 @@ def summarize(rows: list[Row]) -> Row:
     answered = [r["answers"] for r in rows if r["status"] == "submitted"]
     totals = Counter(r["status"] for r in rows)
     return {
+        "playing_time": dict(
+            Counter(
+                a[PLAYING_TIME_KEY]
+                for a in answered
+                if a.get(PLAYING_TIME_KEY) in PLAYING_TIME_OPTIONS
+            )
+        ),
         "n": len(answered),
         "total": sum(v for k, v in totals.items() if k not in EXCLUDED),
         "absent": totals["absent"],
@@ -34,12 +66,66 @@ def summarize(rows: list[Row]) -> Row:
     }
 
 
-def _figure(doc: Any, figure: Figure) -> None:
-    buf = io.BytesIO()
-    figure.savefig(buf, format="png", dpi=130, bbox_inches="tight")
-    buf.seek(0)
-    doc.add_picture(buf, width=Inches(6))
-    figure.clear()
+_FONTS = Path(get_data_path()) / "fonts" / "ttf"
+for _name in ("DejaVuSans", "DejaVuSans-Bold"):
+    pdfmetrics.registerFont(TTFont(_name, str(_FONTS / f"{_name}.ttf")))
+
+_BODY = ParagraphStyle("body", fontName="DejaVuSans", fontSize=10, leading=14, spaceAfter=5)
+_CELL = ParagraphStyle("cell", parent=_BODY, fontSize=8, leading=10, spaceAfter=0)
+_NUMBER = ParagraphStyle("number", parent=_CELL, alignment=0, fontName="DejaVuSans-Bold")
+_HEADER = ParagraphStyle("header", parent=_CELL, fontName="DejaVuSans-Bold")
+_HEADINGS = [
+    ParagraphStyle(
+        f"heading-{size}",
+        parent=_BODY,
+        fontName="DejaVuSans-Bold",
+        fontSize=size,
+        leading=size + 4,
+        spaceBefore=12,
+        keepWithNext=True,
+    )
+    for size in (19, 15, 12)
+]
+_WIDTH = A4[0] - 84  # 36 pt margins plus the default 6 pt frame padding on each side.
+
+
+def _paragraph(value: str, style: ParagraphStyle = _BODY) -> Paragraph:
+    return Paragraph("<br/>".join(escape(value).splitlines()), style)
+
+
+def _table(
+    doc: list[Flowable], rows: list[list[str]], widths: list[int], numeric: tuple[int, ...] = ()
+) -> None:
+    data = [
+        [
+            _paragraph(v, _HEADER if i == 0 else _NUMBER if j in numeric else _CELL)
+            for j, v in enumerate(row)
+        ]
+        for i, row in enumerate(rows)
+    ]
+    table = LongTable(
+        data,
+        colWidths=[_WIDTH * w / sum(widths) for w in widths],
+        repeatRows=1,
+        splitInRow=1,
+        spaceAfter=8,
+    )
+    table.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#dcebf1")),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cad5df")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, _LIGHT]),
+                ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#cad5df")),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+            ]
+        )
+    )
+    doc.append(table)
 
 
 def render_report(snapshot: Row, kind: str, as_of: str) -> bytes:
@@ -47,9 +133,9 @@ def render_report(snapshot: Row, kind: str, as_of: str) -> bytes:
     if kind == "csv":
         stream = io.StringIO()
         writer = csv.writer(stream)
-        sensitive = snapshot["visibility"] == "sensitive"
-        cols = [1, 4, 5, 6] + ([2, 3, 7] if sensitive else [])
+        cols = [PLAYING_TIME, 1, 4, 5, 6, 2, 3, 7]
         labels = {
+            PLAYING_TIME: "Удовлетворённость сыгранным временем",
             1: "Нагрузка",
             2: "Самочувствие",
             3: "Боль",
@@ -58,7 +144,7 @@ def render_report(snapshot: Row, kind: str, as_of: str) -> bytes:
             6: "Командно",
             7: "Комментарий",
         }
-        writer.writerow(["Дата", "Соперник", "ID", "ФИО", "Статус", *(labels[q] for q in cols)])
+        writer.writerow(["Дата", "Соперник", "ID", "ФИО", *(labels[q] for q in cols)])
         for game in games:
             for row in game["rows"]:
                 if snapshot["player"] and row["id"] != snapshot["player"]:
@@ -68,9 +154,8 @@ def render_report(snapshot: Row, kind: str, as_of: str) -> bytes:
                     game["opponent"],
                     row["id"],
                     row["name"],
-                    STATUS[row["status"]],
                     *(
-                        answer_label(q, row["answers"]) if row["status"] == "submitted" else ""
+                        answer_label(q, row["answers"]) if row["status"] == "submitted" else "—"
                         for q in cols
                     ),
                 ]
@@ -83,173 +168,445 @@ def render_report(snapshot: Row, kind: str, as_of: str) -> bytes:
                     ]
                 )
         return stream.getvalue().encode("utf-8-sig")
-    doc = Document()
-    doc.add_heading(snapshot["title"], 0)
-    doc.add_paragraph("Данные на " + as_of)
-    if not games:
-        doc.add_paragraph("За выбранный период матчей нет.")
-    if snapshot["history"] and games:
-        _history(doc, snapshot)
-    else:
-        for game in games:
-            _match(doc, game, snapshot["visibility"])
-    output = io.BytesIO()
-    doc.save(output)
-    return output.getvalue()
+    if kind != "pdf":
+        raise ValueError(f"Неизвестный формат отчёта: {kind}")
+    return _pdf(snapshot, as_of)
 
 
-def _match(doc: Any, game: Row, visibility: str) -> None:
-    doc.add_heading(f"{game['date']} · {game['squad']} против {game['opponent']}", 1)
-    stats = game["stats"]
-    ratio = f"Ответили {stats['n']} из {stats['total']}"
-    doc.add_paragraph(
-        f"{ratio}. Не участвовали в матче: {stats['absent']}. "
-        f"Не будут проходить опрос: {stats['declined']}."
-    )
-    if visibility != "group":
-        columns = ["ФИО", "Статус", "Нагрузка", "Самооценка", "Индивидуально", "Командно"]
-        fields = [1, 4, 5, 6]
-        if visibility == "sensitive":
-            columns += ["Состояние", "Боль", "Комментарий"]
-            fields += [2, 3, 7]
-        table = doc.add_table(rows=0, cols=len(columns))
-        table.style = "Table Grid"
-        _row(table, columns)
+def make_snapshot(
+    games: list[Row],
+    visibility: str,
+    squad: str,
+    anchor: int,
+    period: str = "5",
+    player: int = 0,
+    player_name: str = "",
+) -> Row:
+    responders = set()
+    voters: dict[str, dict[str, set[int]]] = {"5": defaultdict(set), "6": defaultdict(set)}
+    personal: dict[str, Counter[str]] = {"5": Counter(), "6": Counter()}
+    sanitized = []
+    for game in games:
         for row in game["rows"]:
-            _row(
-                table,
-                [
-                    row["name"],
-                    STATUS[row["status"]],
-                    *(
-                        answer_label(q, row["answers"]) if row["status"] == "submitted" else "—"
-                        for q in fields
-                    ),
-                ],
-            )
-    for score, title, limit in (("1", "Нагрузка", 10), ("4", "Самооценка", 5)):
-        doc.add_heading(title, 2)
-        values = stats["scores"][score]
-        if not values:
-            doc.add_paragraph("Нет данных · " + ratio)
-            continue
-        fig = Figure(figsize=(6, 2.5), layout="constrained")
-        ax = fig.subplots()
-        scale = list(range(1, limit + 1))
-        ax.bar(scale, [values.count(i) for i in scale], color="#286480")
-        ax.set(xticks=scale, ylabel="Игроки", xlabel="Оценка", ylim=(0, None))
-        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-        _figure(doc, fig)
-        doc.add_paragraph(f"Среднее {mean(values):.1f} из {limit} · {ratio}".replace(".", ","))
-    doc.add_heading("Запросы на тренировку", 2)
-    for q, title in ((5, "Индивидуально"), (6, "Командно")):
-        doc.add_paragraph(
-            title
-            + ": "
-            + ", ".join(
-                f"{label} — {stats['skills'][str(q)].get(code, 0)}"
-                for code, label in OPTIONS[q].items()
-            )
-        )
-
-
-def _row(table: Any, values: list[str]) -> None:
-    for cell, value in zip(table.add_row().cells, values, strict=True):
-        cell.text = value
-
-
-def _history(doc: Any, snapshot: Row) -> None:
-    games = snapshot["games"]
-    target = snapshot["player"]
-    skills: dict[tuple[int, str], set[int]] = defaultdict(set)
-    player_skills: Counter[tuple[int, str]] = Counter()
-    table = doc.add_table(rows=0, cols=6)
-    table.style = "Table Grid"
-    _row(
-        table,
-        [
-            "Дата · соперник",
-            "Ответили",
-            "Нагрузка команды",
-            "Самооценка команды",
-            "Оценки игрока",
-            "Запросы игрока",
-        ],
-    )
-    series: dict[int, list[float]] = {1: [], 4: []}
-    personal: dict[int, list[float]] = {1: [], 4: []}
-    for g in games:
-        stats = g["stats"]
-        for q in (1, 4):
-            vals = stats["scores"][str(q)]
-            series[q].append(mean(vals) if vals else float("nan"))
-        own = {}
-        for row in g["rows"]:
             if row["status"] != "submitted":
                 continue
-            if row["id"] == target:
-                own = row["answers"]
-            for q in (5, 6):
-                for code in row["answers"].get(str(q), []):
-                    if code != "none":
-                        skills[q, code].add(row["id"])
-                        if row["id"] == target:
-                            player_skills[q, code] += 1
-        for q in (1, 4):
-            personal[q].append(float(own.get(str(q), "nan")))
-        _row(
-            table,
-            [
-                g["date"] + " · " + g["opponent"],
-                f"{stats['n']} из {stats['total']}",
-                *(f"{series[q][-1]:.1f}" if stats["n"] else "Нет данных" for q in (1, 4)),
-                f"{own['1']} / {own['4']}" if own else "—",
-                " / ".join(answer_label(q, own) for q in (5, 6)) if own else "—",
-            ],
-        )
-    for q, label, limit in ((1, "Нагрузка", 10), (4, "Самооценка", 5)):
-        # Длинную историю делим на читаемые панели.
-        for i in range(0, len(games), 10):
-            batch = games[i : i + 10]
-            fig = Figure(figsize=(6, 3), layout="constrained")
-            ax = fig.subplots()
-            x = list(range(len(batch)))
-            ax.plot(x, series[q][i : i + 10], "o-", label="Команда")
-            if target:
-                ax.plot(x, personal[q][i : i + 10], "s--", label=snapshot["player_name"])
-            ax.set(ylim=(1, limit), title=label, xticks=x)
-            ax.set_xticklabels(
-                [g["date"][:5] + " · " + g["opponent"][:16] for g in batch], rotation=35, ha="right"
-            )
-            ax.legend()
-            _figure(doc, fig)
-    doc.add_heading("Запросы за период", 2)
-    responders = {r["id"] for g in games for r in g["rows"] if r["status"] == "submitted"}
-    doc.add_paragraph(
-        f"{games[0]['date']} — {games[-1]['date']}. Ответили игроков: {len(responders)}."
+            uid = row["id"]
+            responders.add(uid)
+            for q in voters:
+                codes = set(row["answers"].get(q, [])) - {"none"}
+                if uid == player:
+                    personal[q].update(codes)
+                else:
+                    for code in codes:
+                        voters[q][code].add(uid)
+        rows = game["rows"]
+        if visibility == "group":
+            rows = []
+        elif player:
+            rows = [row for row in rows if row["id"] == player]
+        sanitized.append({**game, "rows": rows})
+    return {
+        "layout": 10,
+        "visibility": visibility,
+        "squad": squad,
+        "anchor": anchor,
+        "period": period,
+        "player": player,
+        "player_name": player_name,
+        "games": sanitized,
+        "unique": len(responders),
+        "requests": {q: {k: len(ids) for k, ids in codes.items()} for q, codes in voters.items()},
+        "personal_requests": {q: dict(counts) for q, counts in personal.items()},
+    }
+
+
+_INK = colors.HexColor(charts.NAVY)
+_MUTED = colors.HexColor("#516579")
+_ACCENT = colors.HexColor(charts.TEAL)
+_LIGHT = colors.HexColor("#eef4f7")
+_ICONS = json.loads((Path(__file__).parent / "assets" / "report-icons.json").read_text())
+_BANNER = ParagraphStyle(
+    "banner",
+    parent=_HEADINGS[0],
+    textColor=colors.white,
+    fontSize=22,
+    leading=27,
+    spaceBefore=0,
+    spaceAfter=0,
+)
+_KICKER = ParagraphStyle(
+    "kicker",
+    parent=_BODY,
+    fontName="DejaVuSans-Bold",
+    textColor=colors.HexColor("#9de1d7"),
+    fontSize=9,
+    leading=12,
+    spaceAfter=0,
+)
+_SUB = ParagraphStyle("sub", parent=_BODY, textColor=_MUTED, fontSize=9, leading=12)
+
+
+def _banner(doc: list[Flowable], label: str, title: str, subtitle: str) -> None:
+    sub = ParagraphStyle("banner-sub", parent=_BODY, textColor=colors.white, spaceAfter=0)
+    panel = Table(
+        [[_paragraph(label, _KICKER)], [_paragraph(title, _BANNER)], [_paragraph(subtitle, sub)]],
+        colWidths=[_WIDTH],
+        style=[
+            ("BACKGROUND", (0, 0), (-1, -1), _INK),
+            ("LEFTPADDING", (0, 0), (-1, -1), 14),
+            ("TOPPADDING", (0, 0), (0, 0), 9),
+            ("BOTTOMPADDING", (0, -1), (0, -1), 9),
+        ],
     )
-    for q, label in ((5, "Индивидуально"), (6, "Командно")):
-        fig = Figure(figsize=(6, 3), layout="constrained")
-        ax = fig.subplots()
-        for idx, code in enumerate(OPTIONS[q]):
-            ax.barh(
-                idx - 0.16,
-                len(skills[q, code]),
-                height=0.32,
-                color="#286480",
-                label="Игроков" if idx == 0 else None,
-            )
-            if target:
-                ax.barh(
-                    idx + 0.16,
-                    player_skills[q, code],
-                    height=0.32,
-                    color="#bb7433",
-                    label="Матчей игрока" if idx == 0 else None,
-                )
-        ax.set(
-            yticks=list(range(len(OPTIONS[q]))), yticklabels=list(OPTIONS[q].values()), title=label
+    doc.extend([panel, Spacer(1, 7)])
+
+
+def _icon(d: Drawing, name: str, x: float, y: float) -> None:
+    # Локальные контуры Lucide, лицензия в assets/LUCIDE-LICENSE.
+    group = Group()
+    group.translate(x, y)
+    group.scale(0.6, -0.6)
+    path = ShapePath(
+        fillColor=None, strokeColor=_ACCENT, strokeWidth=2, strokeLineCap=1, strokeLineJoin=1
+    )
+    if name == "hourglass":
+        # Original outline on the same 24 × 24 grid as the other report icons.
+        path.moveTo(5, 3)
+        path.lineTo(19, 3)
+        path.moveTo(5, 21)
+        path.lineTo(19, 21)
+        path.moveTo(7, 3)
+        path.lineTo(7, 7)
+        path.lineTo(17, 17)
+        path.lineTo(17, 21)
+        path.moveTo(17, 3)
+        path.lineTo(17, 7)
+        path.lineTo(7, 17)
+        path.lineTo(7, 21)
+        group.add(path)
+        d.add(group)
+        return
+    for method, points in _ICONS[name]:
+        if method == "closePath":
+            path.closePath()
+        elif method != "endPath":
+            getattr(path, method)(*(coord for point in points for coord in point))
+    group.add(path)
+    d.add(group)
+
+
+def _text(
+    d: Drawing,
+    x: float,
+    y: float,
+    value: str,
+    size: float = 9,
+    *,
+    bold: bool = False,
+    color: Any = _INK,
+    center: bool = False,
+) -> None:
+    d.add(
+        String(
+            x,
+            y,
+            value,
+            fontName="DejaVuSans-Bold" if bold else "DejaVuSans",
+            fontSize=size,
+            fillColor=color,
+            textAnchor="middle" if center else "start",
         )
-        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        ax.legend()
-        _figure(doc, fig)
+    )
+
+
+def _metric_background() -> Drawing:
+    d = Drawing(_WIDTH, 70)
+    w = _WIDTH / 3
+    for i in range(3):
+        d.add(Rect(i * w, 2, w - 4, 66, rx=5, ry=5, fillColor=_LIGHT, strokeColor=None))
+    return d
+
+
+def _metrics(
+    n: int, total: int, values: list[tuple[str, str, str]], *, period: bool = False
+) -> Drawing:
+    d = _metric_background()
+    w = _WIDTH / 3
+    _icon(d, "users", 7, 62)
+    _text(
+        d,
+        25,
+        51,
+        "Заполнено анкет за период" if period else "Кол-во ответивших игроков",
+        8,
+        bold=True,
+    )
+    cx, cy, r = 31, 27, 19
+    d.add(Circle(cx, cy, r, fillColor=colors.HexColor("#cad5df"), strokeColor=None))
+    if total and n:
+        if n == total:
+            d.add(Circle(cx, cy, r, fillColor=_ACCENT, strokeColor=None))
+        else:
+            d.add(Wedge(cx, cy, r, 90 - 360 * n / total, 90, fillColor=_ACCENT, strokeColor=None))
+    d.add(Circle(cx, cy, r - 4, fillColor=_LIGHT, strokeColor=None))
+    _text(d, cx, cy - 2.4, f"{n}/{total}", 6.8, bold=True, center=True)
+    _text(d, 57, 32, f"{n / total:.0%}" if total else "Нет участников", 11, bold=True)
+    _text(d, 57, 21, f"Ответили · {n}", 7.6, color=_ACCENT)
+    _text(d, 57, 11, f"Без ответа · {total - n}", 7.6, color=_MUTED)
+    for i, (label, value, note) in enumerate(values, 1):
+        x = i * w + 9
+        _icon(d, "gauge" if i == 1 else "target", x, 62)
+        _text(d, x + 18, 51, label, 8, bold=True)
+        _text(d, x, 25, value, 19, bold=True)
+        _text(d, x, 11, note, 8, color=_MUTED)
+    return d
+
+
+def _scores(game: Row, player: int) -> list[tuple[str, str, str]]:
+    result = []
+    for q, label, limit in (("1", "Нагрузка", 10), ("4", "Самооценка", 5)):
+        vals = game["stats"]["scores"][q]
+        if player:
+            vals = [int(row["answers"][q]) for row in game["rows"] if q in row["answers"]]
+        value = mean(vals) if vals else None
+        display = f"{value:.1f} / {limit}".replace(".", ",") if value is not None else "—"
+        note = "Нет данных" if value is None else ("Оценка игрока" if player else "Среднее команды")
+        if q == "1" and value is not None:
+            note += " · " + charts.zone(value)[2].lower()
+        result.append((label, display, note))
+    return result
+
+
+def _details(doc: list[Flowable], snapshot: Row, heading: str = "") -> None:
+    player = snapshot["player"]
+    games = snapshot["games"] if player else snapshot["games"][-1:]
+    block: list[Flowable] = []
+    block.append(
+        _paragraph(heading or ("Анкеты игрока" if player else "Ответы игроков"), _HEADINGS[1])
+    )
+    rows = [
+        [
+            "Дата · соперник" if player else "ФИО",
+            "Игровое время",
+            "Нагрузка",
+            "Оценка",
+            "Состояние",
+            "Боль",
+            "Навыки",
+            "Командные элементы",
+        ]
+    ]
+    comments = []
+    for game in games:
+        for row in game["rows"]:
+            who = f"{game['date']} · {game['opponent']}" if player else row["name"]
+            answers = row["answers"]
+            fields = [
+                answer_label(q, answers) if row["status"] == "submitted" else "—"
+                for q in (PLAYING_TIME, 1, 4, 2, 3, 5, 6)
+            ]
+            rows.append([who, *fields])
+            if row["status"] == "submitted" and answers.get("7"):
+                comments.append((who, answers["7"]))
+    _table(
+        block,
+        rows,
+        [12, 16, 11, 10, 13, 12, 13, 13] if player else [15, 16, 10, 10, 12, 11, 13, 13],
+        numeric=(2, 3),
+    )
+    if comments and not player:
+        block.append(_paragraph("Комментарии", _HEADINGS[2]))
+        for who, comment in comments:
+            block.append(_paragraph(f"{who} — {comment}"))
+    doc.extend(block)
+
+
+def _player_comments(doc: list[Flowable], games: list[Row]) -> None:
+    comments = [
+        (f"{game['date']} · {game['opponent']}", row["answers"]["7"])
+        for game in games
+        for row in game["rows"]
+        if row["status"] == "submitted" and row["answers"].get("7")
+    ]
+    if comments:
+        doc.append(_paragraph("Комментарии игрока", _HEADINGS[2]))
+        for who, comment in comments:
+            doc.append(_paragraph(f"{who} — {comment}"))
+
+
+def _player_metrics(games: list[Row], *, period: bool = False) -> Drawing:
+    answers = [r["answers"] for g in games for r in g["rows"] if r["status"] == "submitted"]
+    times = Counter(
+        a[PLAYING_TIME_KEY] for a in answers if a.get(PLAYING_TIME_KEY) in PLAYING_TIME_OPTIONS
+    )
+    total = sum(times.values())
+    time = "Нет данных"
+    if total:
+        time = (
+            "\n".join(
+                f"{label}: {times[code] / total:.0%}"
+                for code, label in PLAYING_TIME_OPTIONS.items()
+            )
+            if period
+            else PLAYING_TIME_OPTIONS[next(iter(times))]
+        )
+    values = [time]
+    for key, limit in (("1", 10), ("4", 5)):
+        scores = [int(a[key]) for a in answers if key in a]
+        values.append(f"{mean(scores):.1f} / {limit}" if scores else "Нет данных")
+    d = _metric_background()
+    w = _WIDTH / 3
+    for i, label in enumerate(("Игровое время", "Нагрузка игрока", "Самооценка игрока")):
+        x = i * w + 9
+        _icon(d, ("hourglass", "gauge", "target")[i], x, 62)
+        _text(d, x + 18, 51, label, 8, bold=True)
+        if i == 0:
+            if period and total:
+                for j, line in enumerate(time.splitlines()):
+                    _text(d, x, 34 - j * 12, line, 8.5, bold=True)
+            else:
+                size = 14.0
+                while pdfmetrics.stringWidth(time, "DejaVuSans-Bold", size) > w - 22:
+                    size -= 0.5
+                _text(d, x, 25, time, size, bold=True)
+                _text(d, x, 11, "Ответ игрока", 8, color=_MUTED)
+        else:
+            _text(d, x, 25, values[i], 19 if values[i] != "Нет данных" else 14, bold=True)
+            _text(d, x, 11, "Среднее за период" if period else "Оценка игрока", 8, color=_MUTED)
+    return d
+
+
+def _pdf(snapshot: Row, as_of: str) -> bytes:
+    games = snapshot["games"]
+    player = snapshot["player"]
+    name = snapshot["player_name"]
+    view = snapshot["visibility"]
+    title = {"group": "Общий отчет", "staff": "Отчёт штаба", "player": "Отчет по игроку"}[view]
+    doc: list[Flowable] = []
+    if games:
+        last = games[-1]
+        stats = last["stats"]
+        fixture = f"{last['squad']} — {last['opponent']}"
+        _banner(
+            doc,
+            title.upper(),
+            name if player else fixture,
+            f"{last['date']}  ·  {fixture if player else 'Последний матч'}",
+        )
+        if player:
+            doc.append(_player_metrics([last]))
+            _details(doc, {**snapshot, "games": [last]}, "Анкета за последний матч")
+        else:
+            doc.append(_metrics(stats["n"], stats["total"], _scores(last, player)))
+            doc.append(
+                _paragraph(
+                    f"Не участвовали в матче: {stats['absent']}   ·   "
+                    f"Отказались: {stats['declined']}",
+                    _SUB,
+                )
+            )
+        if stats["n"]:
+            doc.append(
+                _paragraph(
+                    "Игрок и команда за матч" if player else "Оценки команды за матч", _HEADINGS[2]
+                )
+            )
+            doc.append(charts.distribution(last, _WIDTH, player=bool(player)))
+            if not player:
+                doc.append(
+                    KeepTogether(
+                        [
+                            _paragraph("Запросы команды за матч", _HEADINGS[2]),
+                            charts.requests_chart(stats["skills"], _WIDTH, compact=True),
+                        ]
+                    )
+                )
+        else:
+            doc.append(_paragraph("Нет данных"))
+        if view == "staff":
+            _details(doc, snapshot)
+        if player:
+            _player_comments(doc, [last])
+        doc.append(PageBreak())
+        dates = f"{games[0]['date']} — {last['date']}"
+        _banner(doc, "ДИНАМИКА ЗА ПЕРИОД", name if player else snapshot["squad"], dates)
+        if player:
+            doc.append(_player_metrics(games, period=True))
+            _details(doc, snapshot, "Анкеты игрока за период")
+        else:
+            doc.append(
+                _metrics(
+                    sum(g["stats"]["n"] for g in games),
+                    sum(g["stats"]["total"] for g in games),
+                    [
+                        ("Матчи", str(len(games)), "За выбранный период"),
+                        ("Ответили игроки", str(snapshot["unique"]), "Уникальных игроков"),
+                    ],
+                    period=True,
+                )
+            )
+        for start in range(0, len(games), 5):
+            batch = games[start : start + 5]
+            trend_block: list[Flowable] = [
+                _paragraph("Динамика показателей", _HEADINGS[2]),
+            ]
+            if any(g["stats"]["n"] for g in batch):
+                trend_block.append(charts.trends(batch, name, _WIDTH))
+            else:
+                trend_block.append(_paragraph("Нет данных"))
+            table = [["Дата", "Соперник", "Ответы / участники", "Нагрузка / 10", "Самооценка / 5"]]
+            for game in batch:
+                stats = game["stats"]
+                means = [
+                    f"{mean(scores):.1f}".replace(".", ",") if scores else "—"
+                    for scores in (stats["scores"]["1"], stats["scores"]["4"])
+                ]
+                table.append(
+                    [game["date"], game["opponent"], f"{stats['n']} / {stats['total']}", *means]
+                )
+            if not player:
+                _table(trend_block, table, [16, 23, 20, 20, 21])
+            doc.extend(trend_block)
+        request_block: list[Flowable] = [
+            _paragraph("Запросы игрока за период" if player else "Запросы за период", _HEADINGS[2]),
+            _paragraph(
+                dates if player else f"{dates}   ·   Ответили игроков: {snapshot['unique']}", _SUB
+            ),
+        ]
+        requests = snapshot["personal_requests"] if player else snapshot["requests"]
+        if any(requests.values()):
+            request_block.append(
+                charts.requests_chart(
+                    snapshot["requests"],
+                    _WIDTH,
+                    player=bool(player),
+                    personal=snapshot["personal_requests"],
+                )
+            )
+        else:
+            request_block.append(_paragraph("Нет запросов"))
+        doc.append(KeepTogether(request_block))
+        if player:
+            _player_comments(doc, games)
+    else:
+        _banner(doc, title.upper(), name or snapshot["squad"], "За выбранный период матчей нет.")
+    output = io.BytesIO()
+
+    def footer(canvas: Any, document: Any) -> None:
+        canvas.saveState()
+        canvas.setFont("DejaVuSans", 8)
+        canvas.setFillColor(_MUTED)
+        canvas.drawString(36, 20, "Данные на " + as_of)
+        canvas.drawRightString(A4[0] - 36, 20, f"{title}   ·   {document.page}")
+        canvas.restoreState()
+
+    SimpleDocTemplate(
+        output,
+        pagesize=A4,
+        leftMargin=36,
+        rightMargin=36,
+        topMargin=25,
+        bottomMargin=36,
+        title=title,
+    ).build(doc, onFirstPage=footer, onLaterPages=footer)
+    return output.getvalue()

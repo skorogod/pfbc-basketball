@@ -10,7 +10,18 @@ from sqlalchemy.dialects.postgresql import insert
 from pfbc_bot.db.models import AuditLog, Event, MatchSurvey, Squad, SurveyPlayer, SurveyReport, User
 from pfbc_bot.domain.dates import format_local, outside_quiet_hours, utcnow
 from pfbc_bot.domain.enums import EventType, MembershipStatus, SquadRole
-from pfbc_bot.domain.postmatch import EXCLUDED, REVIEW, STATUS, WAITING, advance, form, invitation
+from pfbc_bot.domain.postmatch import (
+    EXCLUDED,
+    PLAYING_TIME,
+    PLAYING_TIME_KEY,
+    PLAYING_TIME_OPTIONS,
+    REVIEW,
+    STATUS,
+    WAITING,
+    advance,
+    form,
+    invitation,
+)
 from pfbc_bot.repositories.uow import UnitOfWork, UowFactory
 from pfbc_bot.schemas.settings import SquadSettings
 from pfbc_bot.schemas.squads import UserContext
@@ -269,7 +280,7 @@ class PostMatchService:
             if p.status == "invited" and step == 0:
                 if action == "start":
                     p.status = "started"
-                    p.step = 1
+                    p.step = PLAYING_TIME
                     p.notice = None
                 elif action in ("absent", "declined"):
                     return (
@@ -299,6 +310,11 @@ class PostMatchService:
             elif step == REVIEW and action == "submit":
                 if not all(str(q) in p.answers for q in (1, 2, 3, 4)):
                     raise Conflict("Заполните обязательные вопросы.")
+                if p.answers.get(PLAYING_TIME_KEY) not in PLAYING_TIME_OPTIONS:
+                    p.step = PLAYING_TIME
+                    msg, kb = form(token, p.step, p.answers)
+                    await uow.commit()
+                    return msg, kb, p.step
                 p.status = "submitted"
                 p.submitted_at = utcnow()
                 p.notice = None

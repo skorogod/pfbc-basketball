@@ -38,8 +38,6 @@ class SquadSettings(BaseModel):
     survey_reminder_hours: int = Field(default=12, ge=1, le=720)
     survey_deadline_hours: int = Field(default=24, ge=1, le=720)
     survey_report_days: int = Field(default=30, ge=1, le=3650)
-    # Внутренние ID пользователей с персональным допуском к чувствительным полям.
-    survey_sensitive_users: list[int] = Field(default_factory=list)
     mtgame_team_id: int | None = Field(default=None, ge=1)
     # поиск следующей игры на mtgame — с этого дня недели (0 — пн) и времени после сыгранной игры
     # и до появления даты следующей: лига назначает её обычно во вторник вечером
