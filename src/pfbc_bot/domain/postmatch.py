@@ -1,6 +1,5 @@
 """Диалог одной анкеты. Ответы в БД используют стабильные коды."""
 
-from collections import Counter
 from html import escape
 from typing import Any
 
@@ -78,19 +77,6 @@ WAITING = {"invited", "started"}
 EXCLUDED = {"absent", "declined", "removed"}
 PAIN_DETAIL = 30
 REVIEW = 8
-
-
-def player_labels(names: dict[int, str]) -> dict[int, str]:
-    """Фамилия для выбора игрока и легенды графика; при совпадении — инициал."""
-    parts = {uid: name.split() for uid, name in names.items()}
-    counts = Counter(words[0].casefold() for words in parts.values() if words)
-    labels = {}
-    for uid, words in parts.items():
-        surname = words[0] if words else str(uid)
-        if counts[surname.casefold()] > 1 and len(words) > 1:
-            surname += " " + words[1][0] + "."
-        labels[uid] = surname
-    return labels
 
 
 def answer_label(step: int, answers: dict[str, Any]) -> str:

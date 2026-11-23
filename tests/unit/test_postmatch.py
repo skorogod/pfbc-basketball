@@ -1,6 +1,6 @@
 import pytest
 
-from pfbc_bot.domain.postmatch import advance, answer_label, player_labels
+from pfbc_bot.domain.postmatch import advance, answer_label
 from pfbc_bot.services.errors import Conflict
 
 
@@ -41,12 +41,21 @@ def test_invalid_input(step: int, action: str, text: str | None) -> None:
         advance(step, {}, action, text)
 
 
-def test_player_labels() -> None:
-    assert player_labels({1: "Иванов Сергей", 2: "Иванов Антон", 3: "Петров Андрей"}) == {
-        1: "Иванов С.",
-        2: "Иванов А.",
-        3: "Петров",
-    }
+async def test_report_player_buttons_show_profile_names(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from pfbc_bot.bot.routers import postmatch
+
+    names = {1: "Иванов Сергей", 2: "Иванов Антон", 3: "Петров Андрей Ильич", 4: "Никита"}
+    reports = SimpleNamespace(report_players=AsyncMock(return_value=names))
+    services = SimpleNamespace(postmatch=SimpleNamespace(reports=reports))
+    cb = SimpleNamespace(data="psm:9:players", answer=AsyncMock())
+    monkeypatch.setattr(postmatch, "callback_message", lambda _: object())
+    send = AsyncMock()
+    monkeypatch.setattr(postmatch, "send_options", send)
+    await postmatch.manage(cb, AsyncMock(), services, SimpleNamespace())
+    assert send.await_args.args[2] == [(name, f"psm:9:period:{uid}") for uid, name in names.items()]
 
 
 @pytest.mark.parametrize("code", ["more", "less", "satisfied"])

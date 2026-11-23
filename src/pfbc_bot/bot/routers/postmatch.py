@@ -10,7 +10,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from pfbc_bot.bot.helpers import callback_message
-from pfbc_bot.domain.postmatch import PAIN_DETAIL, player_labels
+from pfbc_bot.domain.postmatch import PAIN_DETAIL
 from pfbc_bot.integrations.telegram.notifier import to_markup
 from pfbc_bot.schemas.squads import UserContext
 from pfbc_bot.services.container import Services
@@ -185,7 +185,7 @@ async def manage(
                 ]
             )
     elif action == "players":
-        names = player_labels(await service.reports.report_players(ctx, sid))
+        names = await service.reports.report_players(ctx, sid)
         card = "👤 <b>Отчёт игрока</b>\n\n" + (
             "Выберите игрока." if names else "За этот период участников нет."
         )
